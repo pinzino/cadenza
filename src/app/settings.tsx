@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { TimeWindow, timeToMinutes } from '@/lib/planner';
+import { formatTimeInput, TimeWindow, timeToMinutes } from '@/lib/planner';
 import { supabase } from '@/lib/supabase';
 
 const validTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
@@ -70,7 +70,7 @@ export default function SettingsScreen() {
 
   function updateWindow(category: 'work' | 'personal', index: number, field: keyof TimeWindow, value: string) {
     const setter = category === 'work' ? setWorkWindows : setPersonalWindows;
-    setter((current) => current.map((window, windowIndex) => windowIndex === index ? { ...window, [field]: value } : window));
+    setter((current) => current.map((window, windowIndex) => windowIndex === index ? { ...window, [field]: formatTimeInput(value) } : window));
   }
 
   function addWindow(category: 'work' | 'personal') {

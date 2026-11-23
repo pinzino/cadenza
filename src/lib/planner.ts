@@ -8,7 +8,10 @@ export type PlannerTask = {
   duration_minutes: number;
   scheduled_date: string | null;
   scheduled_time: string | null;
+  scheduled_window_start: string | null;
+  scheduled_window_end: string | null;
   is_complete: boolean;
+  is_splittable: boolean;
 };
 
 export type PlannerSettings = {
@@ -29,6 +32,7 @@ export type PlannedBlock = {
   block_index: number;
   total_blocks: number;
   is_fixed: boolean;
+  is_manual: boolean;
 };
 
 export type PlanResult = {
@@ -49,6 +53,11 @@ export function minutesToTime(minutes: number) {
   return `${String(hours).padStart(2, '0')}:${String(remainingMinutes).padStart(2, '0')}:00`;
 }
 
+export function formatTimeInput(value: string) {
+  const digits = value.replace(/\D/g, '').slice(0, 4);
+  return digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits;
+}
+
 function dateKey(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -62,12 +71,22 @@ function addDays(date: Date, amount: number) {
   return result;
 }
 
-export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettings, startDate = new Date()): PlanResult {
+export function buildAutomaticPlan(
+  tasks: PlannerTask[],
+  settings: PlannerSettings,
+  startDate = new Date(),
+  manualBlocks: PlannedBlock[] = [],
+): PlanResult {
   const activeTasks = tasks.filter((task) => !task.is_complete);
-  const blocks: PlannedBlock[] = [];
+  const blocks: PlannedBlock[] = manualBlocks.map((block) => ({ ...block, is_manual: true }));
   const fixedRemainders = new Map<string, number>();
+  const manuallyAllocatedMinutes = new Map<string, number>();
 
-  for (const task of activeTasks.filter((item) => item.scheduled_date && item.scheduled_time)) {
+  manualBlocks.forEach((block) => {
+    manuallyAllocatedMinutes.set(block.task_id, (manuallyAllocatedMinutes.get(block.task_id) ?? 0) + block.duration_minutes);
+  });
+
+  for (const task of activeTasks.filter((item) => item.scheduled_date && item.scheduled_time && !manuallyAllocatedMinutes.has(item.id))) {
     const start = timeToMinutes(task.scheduled_time!);
     const fixedDuration = Math.min(task.duration_minutes, Math.max(1, 1440 - start));
     blocks.push({
@@ -79,13 +98,22 @@ export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettin
       block_index: 1,
       total_blocks: 1,
       is_fixed: true,
+      is_manual: false,
     });
     if (task.duration_minutes > fixedDuration) fixedRemainders.set(task.id, task.duration_minutes - fixedDuration);
   }
 
   const flexibleTasks = activeTasks
     .filter((task) => !task.scheduled_time || fixedRemainders.has(task.id))
-    .map((task) => fixedRemainders.has(task.id) ? { ...task, duration_minutes: fixedRemainders.get(task.id)!, scheduled_time: null } : task)
+    .map((task) => {
+      const originalDuration = fixedRemainders.has(task.id) ? fixedRemainders.get(task.id)! : task.duration_minutes;
+      return {
+        ...task,
+        duration_minutes: Math.max(0, originalDuration - (manuallyAllocatedMinutes.get(task.id) ?? 0)),
+        scheduled_time: null,
+      };
+    })
+    .filter((task) => task.duration_minutes > 0)
     .sort((first, second) => {
       const deadlineFirst = first.scheduled_date ?? '9999-12-31';
       const deadlineSecond = second.scheduled_date ?? '9999-12-31';
@@ -103,8 +131,11 @@ export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettin
     const taskBlocks: PlannedBlock[] = [];
 
     for (let dayOffset = 0; dayOffset < 90 && remaining > 0; dayOffset += 1) {
+      const forcedStart = task.scheduled_window_start ? timeToMinutes(task.scheduled_window_start) : 0;
+      const forcedEnd = task.scheduled_window_end ? timeToMinutes(task.scheduled_window_end) : 1440;
       const availableWindows = (task.category === 'Lavoro' ? settings.workWindows : settings.personalWindows)
-        .map((window) => ({ start: timeToMinutes(window.start), end: timeToMinutes(window.end) }))
+        .map((window) => ({ start: Math.max(timeToMinutes(window.start), forcedStart), end: Math.min(timeToMinutes(window.end), forcedEnd) }))
+        .filter((window) => window.start < window.end)
         .sort((first, second) => first.start - second.start);
       const currentDate = addDays(firstPlanningDate, dayOffset);
       const currentDateKey = dateKey(currentDate);
@@ -127,7 +158,13 @@ export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettin
 
           const available = Math.max(0, Math.min(boundary.start, window.end) - cursor);
           if (available > 0) {
-            const duration = Math.min(remaining, settings.maxBlockMinutes, available);
+            const duration = task.is_splittable
+              ? Math.min(remaining, settings.maxBlockMinutes, available)
+              : available >= remaining ? remaining : 0;
+            if (duration <= 0) {
+              cursor = Math.max(cursor, boundary.end + settings.breakMinutes);
+              continue;
+            }
             const block: PlannedBlock = {
               task_id: task.id,
               block_date: currentDateKey,
@@ -137,6 +174,7 @@ export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettin
               block_index: 1,
               total_blocks: 1,
               is_fixed: false,
+              is_manual: false,
             };
             taskBlocks.push(block);
             blocks.push(block);
@@ -150,13 +188,18 @@ export function buildAutomaticPlan(tasks: PlannerTask[], settings: PlannerSettin
       }
     }
 
-    const totalBlocks = taskBlocks.length;
-    taskBlocks.forEach((block, index) => {
-      block.block_index = index + 1;
-      block.total_blocks = totalBlocks;
-    });
     if (remaining > 0) unscheduledTaskIds.push(task.id);
   }
+
+  const blocksByTask = new Map<string, PlannedBlock[]>();
+  blocks.forEach((block) => blocksByTask.set(block.task_id, [...(blocksByTask.get(block.task_id) ?? []), block]));
+  blocksByTask.forEach((taskBlocks) => {
+    taskBlocks.sort((first, second) => `${first.block_date}${first.start_time}`.localeCompare(`${second.block_date}${second.start_time}`));
+    taskBlocks.forEach((block, index) => {
+      block.block_index = index + 1;
+      block.total_blocks = taskBlocks.length;
+    });
+  });
 
   return {
     blocks: blocks.sort((first, second) => `${first.block_date}${first.start_time}`.localeCompare(`${second.block_date}${second.start_time}`)),
