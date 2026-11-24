@@ -32,13 +32,15 @@ export default function SettingsScreen() {
   const [personalWindows, setPersonalWindows] = useState<TimeWindow[]>([{ start: '18:00', end: '21:00' }]);
   const [maxBlockMinutes, setMaxBlockMinutes] = useState(60);
   const [breakMinutes, setBreakMinutes] = useState(15);
+  const [reminderDefaultEnabled, setReminderDefaultEnabled] = useState(true);
+  const [reminderDefaultMinutes, setReminderDefaultMinutes] = useState(10);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const loadSettings = useCallback(async (currentUserId: string) => {
     setIsLoading(true);
-    const { data, error } = await supabase.from('planner_settings').select('day_start, day_end, personal_start, personal_end, work_windows, personal_windows, max_block_minutes, break_minutes').eq('user_id', currentUserId).maybeSingle();
+    const { data, error } = await supabase.from('planner_settings').select('day_start, day_end, personal_start, personal_end, work_windows, personal_windows, max_block_minutes, break_minutes, reminder_default_enabled, reminder_default_minutes').eq('user_id', currentUserId).maybeSingle();
     if (error) {
       setErrorMessage('Completa gli aggiornamenti 002, 003 e 004 in Supabase.');
     } else if (data) {
@@ -48,6 +50,8 @@ export default function SettingsScreen() {
       setPersonalWindows(savedPersonal.length ? savedPersonal : [{ start: data.personal_start.slice(0, 5), end: data.personal_end.slice(0, 5) }]);
       setMaxBlockMinutes(data.max_block_minutes);
       setBreakMinutes(data.break_minutes);
+      setReminderDefaultEnabled(data.reminder_default_enabled);
+      setReminderDefaultMinutes(data.reminder_default_minutes);
     }
     setIsLoading(false);
   }, []);
@@ -102,6 +106,8 @@ export default function SettingsScreen() {
       personal_windows: personalWindows,
       max_block_minutes: maxBlockMinutes,
       break_minutes: breakMinutes,
+      reminder_default_enabled: reminderDefaultEnabled,
+      reminder_default_minutes: reminderDefaultMinutes,
       updated_at: new Date().toISOString(),
     });
     setIsSaving(false);
@@ -147,6 +153,11 @@ export default function SettingsScreen() {
           <View style={styles.options}>{[30, 45, 60, 90].map((minutes) => <Pressable key={minutes} onPress={() => setMaxBlockMinutes(minutes)} style={[styles.option, maxBlockMinutes === minutes && styles.optionSelected]}><Text style={[styles.optionText, maxBlockMinutes === minutes && styles.optionTextSelected]}>{minutes} min</Text></Pressable>)}</View>
           <Text style={styles.label}>PAUSA FRA I BLOCCHI</Text>
           <View style={styles.options}>{[0, 10, 15, 20].map((minutes) => <Pressable key={minutes} onPress={() => setBreakMinutes(minutes)} style={[styles.option, breakMinutes === minutes && styles.optionSelected]}><Text style={[styles.optionText, breakMinutes === minutes && styles.optionTextSelected]}>{minutes ? `${minutes} min` : 'Nessuna'}</Text></Pressable>)}</View>
+
+          <View style={styles.divider} />
+          <Text style={styles.label}>PROMEMORIA PREDEFINITO PER I NUOVI TASK</Text>
+          <View style={styles.options}><Pressable onPress={() => setReminderDefaultEnabled(true)} style={[styles.option, reminderDefaultEnabled && styles.optionSelected]}><Text style={[styles.optionText, reminderDefaultEnabled && styles.optionTextSelected]}>Attivo</Text></Pressable><Pressable onPress={() => setReminderDefaultEnabled(false)} style={[styles.option, !reminderDefaultEnabled && styles.optionSelected]}><Text style={[styles.optionText, !reminderDefaultEnabled && styles.optionTextSelected]}>Disattivo</Text></Pressable></View>
+          {reminderDefaultEnabled && <><Text style={styles.label}>ANTICIPO PREDEFINITO</Text><View style={styles.options}>{[0, 5, 10, 15, 30, 60].map((minutes) => <Pressable key={minutes} onPress={() => setReminderDefaultMinutes(minutes)} style={[styles.option, reminderDefaultMinutes === minutes && styles.optionSelected]}><Text style={[styles.optionText, reminderDefaultMinutes === minutes && styles.optionTextSelected]}>{minutes ? `${minutes} min` : 'All’orario'}</Text></Pressable>)}</View></>}
 
           <Pressable disabled={isSaving} onPress={() => void saveSettings()} style={({ pressed }) => [styles.saveButton, (pressed || isSaving) && styles.saveButtonPressed]}>{isSaving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.saveButtonText}>Salva impostazioni</Text>}</Pressable>
         </View>}

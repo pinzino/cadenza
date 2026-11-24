@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import {
   ActivityIndicator,
@@ -14,7 +14,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type { ScrollViewInstance } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
+import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
 import { AuthScreen } from '@/components/auth-screen';
 import { formatTimeInput, timeToMinutes } from '@/lib/planner';
@@ -22,6 +25,7 @@ import { supabase } from '@/lib/supabase';
 
 type Priority = 'Alta' | 'Media' | 'Bassa';
 type Category = 'Lavoro' | 'Personale';
+type VoiceStep = 'title' | 'category' | 'priority' | 'duration' | 'dueDate' | 'save';
 
 type Task = {
   id: string;
@@ -35,12 +39,23 @@ type Task = {
   scheduled_window_end: string | null;
   is_complete: boolean;
   is_splittable: boolean;
+  reminder_enabled: boolean;
+  reminder_minutes: number;
 };
 
 const priorityColors: Record<Priority, { text: string; background: string }> = {
   Alta: { text: '#B54708', background: '#FFF1E8' },
   Media: { text: '#7A5A00', background: '#FFF7D6' },
   Bassa: { text: '#37705B', background: '#EAF7F0' },
+};
+
+const voiceStepPrompts: Record<VoiceStep, string> = {
+  title: 'Dimmi il titolo del task.',
+  category: 'È un task di lavoro o personale?',
+  priority: 'Qual è la priorità: alta, media o bassa?',
+  duration: 'Quanto tempo serve? Per esempio: 30 minuti oppure un’ora.',
+  dueDate: 'Quando vuoi farlo? Puoi dire oggi, domani, un giorno della settimana, oppure senza data.',
+  save: 'Se va bene, di’ “salva”. Oppure tocca un campo per modificarlo.',
 };
 
 const todayLabel = new Intl.DateTimeFormat('it-IT', {
@@ -110,6 +125,116 @@ function toStoredTime(value: string) {
   if (!time) return null;
   const match = /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time);
   return match ? `${time}:00` : undefined;
+}
+
+type VoiceTaskDetails = {
+  title: string;
+  category?: Category;
+  priority?: Priority;
+  durationMinutes?: number;
+  date?: string | null;
+  time?: string;
+  reminderMinutes?: number;
+};
+
+function dateForWeekday(today: Date, weekday: number, forceNextWeek: boolean) {
+  const offset = (weekday - today.getDay() + 7) % 7;
+  const daysToAdd = forceNextWeek && offset === 0 ? 7 : offset;
+  const result = new Date(today);
+  result.setDate(result.getDate() + daysToAdd);
+  return toDateKey(result);
+}
+
+function parseVoiceTask(transcript: string): VoiceTaskDetails {
+  const today = new Date();
+  const lower = transcript.toLocaleLowerCase('it-IT');
+  const details: VoiceTaskDetails = { title: transcript.trim() };
+  let cleanTitle = transcript;
+  const remove = (expression: RegExp) => {
+    cleanTitle = cleanTitle.replace(expression, ' ');
+  };
+
+  if (/\b(?:senza data|note sparse|nel mucchio)\b/i.test(lower)) {
+    details.date = null;
+    remove(/\b(?:senza data|note sparse|nel mucchio)\b/gi);
+  } else if (/\bdopodomani\b/i.test(lower)) {
+    const date = new Date(today);
+    date.setDate(date.getDate() + 2);
+    details.date = toDateKey(date);
+    remove(/\bdopodomani\b/gi);
+  } else if (/\bdomani\b/i.test(lower)) {
+    const date = new Date(today);
+    date.setDate(date.getDate() + 1);
+    details.date = toDateKey(date);
+    remove(/\bdomani\b/gi);
+  } else if (/\boggi\b/i.test(lower)) {
+    details.date = toDateKey(today);
+    remove(/\boggi\b/gi);
+  }
+
+  const weekdays: [RegExp, number][] = [
+    [/\b(?:domenica)\b/i, 0], [/\b(?:lunedì|lunedi)\b/i, 1], [/\bmartedì\b/i, 2],
+    [/\bmercoledì\b/i, 3], [/\bgiovedì\b/i, 4], [/\bvenerdì\b/i, 5], [/\bsabato\b/i, 6],
+  ];
+  const spokenWeekday = weekdays.find(([expression]) => expression.test(lower));
+  if (spokenWeekday) {
+    const nextWeek = /\bprossim[oa]\b/i.test(lower);
+    details.date = dateForWeekday(today, spokenWeekday[1], nextWeek);
+    remove(/\b(?:il )?(?:prossim[oa] )?(?:domenica|lunedì|lunedi|martedì|mercoledì|giovedì|venerdì|sabato)\b/gi);
+  }
+
+  const timeMatch = lower.match(/\b(?:alle?|ore)\s+([01]?\d|2[0-3])(?:\s*(?:[:.]|e)\s*([0-5]?\d))?\b/i);
+  if (timeMatch) {
+    const hours = Number(timeMatch[1]);
+    const minutes = timeMatch[2] ? Number(timeMatch[2]) : 0;
+    details.time = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    remove(/\b(?:alle?|ore)\s+(?:[01]?\d|2[0-3])(?:\s*(?:[:.]|e)\s*[0-5]?\d)?\b/gi);
+  }
+
+  const hourDuration = lower.match(/\b(?:per|durata(?: di)?|da)\s+(\d+)\s*(?:ore?|h)(?:\s*(?:e)?\s*(\d+)\s*(?:minuti|min|m))?\b/i);
+  const oneHourDuration = lower.match(/\b(?:per|durata(?: di)?|da)\s+un'?\s*ora(?:\s*(?:e)?\s*(\d+)\s*(?:minuti|min|m))?\b/i);
+  const minuteDuration = lower.match(/\b(?:per|durata(?: di)?|da)\s+(\d+)\s*(?:minuti|min|m)\b/i);
+  if (hourDuration) {
+    details.durationMinutes = Number(hourDuration[1]) * 60 + Number(hourDuration[2] ?? 0);
+    remove(/\b(?:per|durata(?: di)?|da)\s+\d+\s*(?:ore?|h)(?:\s*(?:e)?\s*\d+\s*(?:minuti|min|m))?\b/gi);
+  } else if (oneHourDuration) {
+    details.durationMinutes = 60 + Number(oneHourDuration[1] ?? 0);
+    remove(/\b(?:per|durata(?: di)?|da)\s+un'?\s*ora(?:\s*(?:e)?\s*\d+\s*(?:minuti|min|m))?\b/gi);
+  } else if (minuteDuration) {
+    details.durationMinutes = Number(minuteDuration[1]);
+    remove(/\b(?:per|durata(?: di)?|da)\s+\d+\s*(?:minuti|min|m)\b/gi);
+  }
+
+  if (/\b(?:lavoro|lavorativ[oa])\b/i.test(lower)) {
+    details.category = 'Lavoro';
+    remove(/\b(?:categoria )?(?:lavoro|lavorativ[oa])\b/gi);
+  } else if (/\bpersonale\b/i.test(lower)) {
+    details.category = 'Personale';
+    remove(/\b(?:categoria )?personale\b/gi);
+  }
+
+  const priorityMatch = lower.match(/\bpriorit(?:à|a)[\s,:-]*(?:è\s*)?(alta|media|bassa)\b/i);
+  if (priorityMatch) {
+    details.priority = `${priorityMatch[1][0].toUpperCase()}${priorityMatch[1].slice(1).toLowerCase()}` as Priority;
+    remove(/\bpriorit(?:à|a)[\s,:-]*(?:è\s*)?(?:alta|media|bassa)\b/gi);
+  } else if (/\burgente\b/i.test(lower)) {
+    details.priority = 'Alta';
+    remove(/\burgente\b/gi);
+  }
+
+  const reminderMatch = lower.match(/\b(?:ricordamelo|promemoria)\s+(\d+)\s*(?:minuti|min)\s+prima\b/i);
+  if (reminderMatch) {
+    details.reminderMinutes = Number(reminderMatch[1]);
+    remove(/\b(?:ricordamelo|promemoria)\s+\d+\s*(?:minuti|min)\s+prima\b/gi);
+  }
+
+  const candidateTitle = cleanTitle
+    .replace(/[,:;]+/g, ' ')
+    .replace(/\b(?:e|per|il|alle?)\s*$/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  details.title = candidateTitle.length >= 2 ? candidateTitle : transcript.trim();
+  return details;
 }
 
 function SwipeableTask({ task, onToggle, onEdit, onDelete }: { task: Task; onToggle: () => void; onEdit: () => void; onDelete: () => void }) {
@@ -204,9 +329,176 @@ export default function HomeScreen() {
   const [newTaskTime, setNewTaskTime] = useState('');
   const [newTaskWindowStart, setNewTaskWindowStart] = useState('');
   const [newTaskWindowEnd, setNewTaskWindowEnd] = useState('');
+  const [newTaskReminderEnabled, setNewTaskReminderEnabled] = useState(true);
+  const [newTaskReminderMinutes, setNewTaskReminderMinutes] = useState(10);
+  const [defaultReminderEnabled, setDefaultReminderEnabled] = useState(true);
+  const [defaultReminderMinutes, setDefaultReminderMinutes] = useState(10);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [calendarCursor, setCalendarCursor] = useState(new Date());
   const [isSaving, setIsSaving] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceSummary, setVoiceSummary] = useState<string | null>(null);
+  const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
+  const [voiceStep, setVoiceStep] = useState<VoiceStep | null>(null);
+  const voiceStepRef = useRef<VoiceStep | null>(null);
+  const pendingVoiceStepRef = useRef<VoiceStep | null>(null);
+  const composerScrollRef = useRef<ScrollViewInstance>(null);
+  const voiceStepPositions = useRef<Partial<Record<VoiceStep, number>>>({});
+  const voiceSaveActionRef = useRef<(() => void) | null>(null);
+
+  function setActiveVoiceStep(step: VoiceStep | null) {
+    voiceStepRef.current = step;
+    setVoiceStep(step);
+  }
+
+  function rememberVoiceStepPosition(step: VoiceStep, position: number) {
+    voiceStepPositions.current[step] = position;
+  }
+
+  function interruptVoiceGuide() {
+    const wasRunning = isListening || voiceStepRef.current !== null;
+    pendingVoiceStepRef.current = null;
+    setActiveVoiceStep(null);
+    if (isListening) ExpoSpeechRecognitionModule.stop();
+    if (wasRunning) setVoiceSummary('Guida vocale interrotta: puoi modificare il task manualmente.');
+  }
+
+  function setVoiceDuration(minutes: number) {
+    if ([15, 30, 45, 60].includes(minutes)) {
+      setNewTaskDuration(minutes);
+      setIsCustomDuration(false);
+      return;
+    }
+    const days = Math.floor(minutes / 1440);
+    const remainingMinutes = minutes % 1440;
+    setCustomDays(String(days));
+    setCustomHours(String(Math.floor(remainingMinutes / 60)));
+    setCustomMinutes(String(remainingMinutes % 60));
+    setIsCustomDuration(true);
+  }
+
+  function acceptVoiceStep(transcript: string) {
+    const currentStep = voiceStepRef.current;
+    if (!currentStep) return;
+    const details = parseVoiceTask(currentStep === 'duration' ? `durata ${transcript}` : currentStep === 'priority' ? `priorità ${transcript}` : currentStep === 'category' ? `categoria ${transcript}` : transcript);
+    let accepted = false;
+    let nextStep: VoiceStep | null = null;
+    let recognizedLabel = '';
+
+    if (currentStep === 'title' && transcript.trim().length >= 2) {
+      setNewTaskTitle(transcript.trim());
+      accepted = true;
+      nextStep = 'category';
+      recognizedLabel = `Titolo: ${transcript.trim()}`;
+    } else if (currentStep === 'category' && details.category) {
+      setNewTaskCategory(details.category);
+      accepted = true;
+      nextStep = 'priority';
+      recognizedLabel = `Categoria: ${details.category}`;
+    } else if (currentStep === 'priority' && details.priority) {
+      setNewTaskPriority(details.priority);
+      accepted = true;
+      nextStep = 'duration';
+      recognizedLabel = `Priorità: ${details.priority}`;
+    } else if (currentStep === 'duration' && details.durationMinutes && details.durationMinutes > 0) {
+      setVoiceDuration(details.durationMinutes);
+      accepted = true;
+      nextStep = 'dueDate';
+      recognizedLabel = `Durata: ${formatDuration(details.durationMinutes)}`;
+    } else if (currentStep === 'dueDate' && details.date !== undefined) {
+      setNewTaskDate(details.date);
+      if (!details.date) setNewTaskTime('');
+      accepted = true;
+      nextStep = 'save';
+      recognizedLabel = details.date ? `Scadenza: ${formatScheduledDate(details.date)}` : 'Senza data';
+    } else if (currentStep === 'save' && /\b(?:salva|conferma)\b/i.test(transcript)) {
+      accepted = true;
+      recognizedLabel = 'Salvataggio in corso';
+    }
+
+    if (!accepted) {
+      setVoiceSummary(`Non ho capito. ${voiceStepPrompts[currentStep]}`);
+      return;
+    }
+
+    if (currentStep === 'save') {
+      pendingVoiceStepRef.current = null;
+      setActiveVoiceStep(null);
+      setVoiceSummary(`${recognizedLabel}.`);
+      voiceSaveActionRef.current?.();
+    } else if (nextStep) {
+      pendingVoiceStepRef.current = nextStep;
+      setActiveVoiceStep(nextStep);
+      setVoiceSummary(`${recognizedLabel}. ${voiceStepPrompts[nextStep]}`);
+    } else {
+      setActiveVoiceStep(null);
+      setVoiceSummary(`${recognizedLabel}. Compilazione vocale completata.`);
+    }
+  }
+
+  async function startVoiceStep(step: VoiceStep) {
+    try {
+      setVoiceTranscript(null);
+      setActiveVoiceStep(step);
+      setVoiceSummary(voiceStepPrompts[step]);
+
+      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
+        Alert.alert('Dettatura non disponibile', 'Il riconoscimento vocale non è disponibile su questo dispositivo.');
+        return;
+      }
+
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Microfono non autorizzato', 'Per inserire un task a voce, consenti l’uso del microfono nelle impostazioni del telefono.');
+        return;
+      }
+
+      ExpoSpeechRecognitionModule.start({
+        lang: 'it-IT',
+        interimResults: true,
+        continuous: false,
+        iosTaskHint: 'dictation',
+      });
+    } catch {
+      setIsListening(false);
+      Alert.alert('Dettatura non disponibile', 'Per usare il microfono serve la versione di sviluppo di Cadenza, non Expo Go.');
+    }
+  }
+
+  useSpeechRecognitionEvent('start', () => {
+    setIsListening(true);
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    setIsListening(false);
+    const nextStep = pendingVoiceStepRef.current;
+    if (nextStep) {
+      pendingVoiceStepRef.current = null;
+      void startVoiceStep(nextStep);
+    }
+  });
+
+  useSpeechRecognitionEvent('result', (event) => {
+    const transcript = event.results[0]?.transcript?.trim();
+    if (!transcript) return;
+    setVoiceTranscript(transcript);
+    if (event.isFinal) acceptVoiceStep(transcript);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    setIsListening(false);
+    if (event.error !== 'aborted') {
+      setVoiceSummary(event.message || 'Non ho capito la risposta. Tocca il microfono e riprova.');
+    }
+  });
+
+  useEffect(() => {
+    if (!voiceStep) return;
+    const scrollY = voiceStepPositions.current[voiceStep];
+    if (scrollY === undefined) return;
+    const scrollTimer = setTimeout(() => composerScrollRef.current?.scrollTo({ y: Math.max(0, scrollY - 64), animated: true }), 80);
+    return () => clearTimeout(scrollTimer);
+  }, [voiceStep]);
 
   const quickDateOptions = useMemo(() => {
     const today = new Date();
@@ -244,24 +536,27 @@ export default function HomeScreen() {
     if (!session) return;
     setIsLoadingTasks(true);
     setErrorMessage(null);
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable')
-      .order('scheduled_date', { ascending: true, nullsFirst: false })
-      .order('scheduled_time', { ascending: true, nullsFirst: false })
-      .order('created_at', { ascending: true });
+    const [tasksResult, settingsResult] = await Promise.all([
+      supabase.from('tasks').select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes').order('scheduled_date', { ascending: true, nullsFirst: false }).order('scheduled_time', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true }),
+      supabase.from('planner_settings').select('reminder_default_enabled, reminder_default_minutes').eq('user_id', session.user.id).maybeSingle(),
+    ]);
+    const { data, error } = tasksResult;
 
     if (error) {
       setErrorMessage('Non riesco ancora a leggere i task. Esegui lo script schema.sql in Supabase.');
     } else {
       setTasks(data as Task[]);
+      if (settingsResult.data) {
+        setDefaultReminderEnabled(settingsResult.data.reminder_default_enabled);
+        setDefaultReminderMinutes(settingsResult.data.reminder_default_minutes);
+      }
     }
     setIsLoadingTasks(false);
   }, [session]);
 
-  useEffect(() => {
-    if (session) void Promise.resolve().then(loadTasks);
-  }, [loadTasks, session]);
+  useFocusEffect(useCallback(() => {
+    if (session) void loadTasks();
+  }, [loadTasks, session]));
 
   const plannedMinutes = useMemo(
     () => tasks.filter((task) => !task.is_complete && task.scheduled_date).reduce((total, task) => total + task.duration_minutes, 0),
@@ -318,14 +613,16 @@ export default function HomeScreen() {
       scheduled_window_start: scheduledWindowStart,
       scheduled_window_end: scheduledWindowEnd,
       is_splittable: newTaskSplittable,
+      reminder_enabled: newTaskReminderEnabled,
+      reminder_minutes: newTaskReminderMinutes,
       is_unscheduled: false,
       planning_note: null,
     };
     const result = editingTask
       ? await supabase.from('tasks').update(taskValues).eq('id', editingTask.id)
-        .select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable').single()
+        .select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes').single()
       : await supabase.from('tasks').insert({ user_id: session.user.id, ...taskValues })
-        .select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable').single();
+        .select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes').single();
     const { data, error } = result;
     setIsSaving(false);
 
@@ -340,6 +637,10 @@ export default function HomeScreen() {
       : [...currentTasks, data as Task]);
     closeComposer();
   }
+
+  useEffect(() => {
+    voiceSaveActionRef.current = () => { void addTask(); };
+  });
 
   function openComposer() {
     setEditingTask(null);
@@ -356,6 +657,12 @@ export default function HomeScreen() {
     setNewTaskTime('');
     setNewTaskWindowStart('');
     setNewTaskWindowEnd('');
+    setNewTaskReminderEnabled(defaultReminderEnabled);
+    setNewTaskReminderMinutes(defaultReminderMinutes);
+    setVoiceSummary(null);
+    setVoiceTranscript(null);
+    setActiveVoiceStep(null);
+    pendingVoiceStepRef.current = null;
     setIsComposerOpen(true);
   }
 
@@ -368,6 +675,12 @@ export default function HomeScreen() {
     setNewTaskTime(task.scheduled_time?.slice(0, 5) ?? '');
     setNewTaskWindowStart(task.scheduled_window_start?.slice(0, 5) ?? '');
     setNewTaskWindowEnd(task.scheduled_window_end?.slice(0, 5) ?? '');
+    setNewTaskReminderEnabled(task.reminder_enabled);
+    setNewTaskReminderMinutes(task.reminder_minutes);
+    setVoiceSummary(null);
+    setVoiceTranscript(null);
+    setActiveVoiceStep(null);
+    pendingVoiceStepRef.current = null;
     setNewTaskSplittable(task.is_splittable);
 
     if ([15, 30, 45, 60].includes(task.duration_minutes)) {
@@ -400,8 +713,20 @@ export default function HomeScreen() {
 
   function closeComposer() {
     if (isSaving) return;
+    if (isListening) ExpoSpeechRecognitionModule.stop();
+    setActiveVoiceStep(null);
+    pendingVoiceStepRef.current = null;
     setIsComposerOpen(false);
     setEditingTask(null);
+  }
+
+  function toggleVoiceInput() {
+    if (isListening) {
+      pendingVoiceStepRef.current = null;
+      ExpoSpeechRecognitionModule.stop();
+      return;
+    }
+    void startVoiceStep(voiceStepRef.current ?? 'title');
   }
 
   async function toggleTask(task: Task) {
@@ -500,58 +825,88 @@ export default function HomeScreen() {
         <View style={styles.modalBackdrop}>
           <Pressable accessibilityLabel="Chiudi modulo task" onPress={closeComposer} style={styles.modalDismissArea} />
           <View style={styles.modalCard}>
-            <ScrollView style={styles.modalScroller} contentContainerStyle={styles.modalScrollContent} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled" nestedScrollEnabled showsVerticalScrollIndicator>
+            <ScrollView ref={composerScrollRef} style={styles.modalScroller} contentContainerStyle={styles.modalScrollContent} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled" nestedScrollEnabled showsVerticalScrollIndicator>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>{editingTask ? 'Modifica task' : 'Nuovo task'}</Text>
             <Text style={styles.modalSubtitle}>Pianificalo oppure lascialo tra le note sparse.</Text>
-            <TextInput autoFocus placeholder="Es. Prenotare la visita" placeholderTextColor="#938F8B" value={newTaskTitle} onChangeText={setNewTaskTitle} onSubmitEditing={() => void addTask()} returnKeyType="done" style={styles.input} />
-            <Text style={styles.fieldLabel}>CATEGORIA</Text>
-            <View style={styles.optionRow}>
-              {(['Personale', 'Lavoro'] as Category[]).map((category) => (
-                <Pressable key={category} onPress={() => setNewTaskCategory(category)} style={[styles.choiceButton, newTaskCategory === category && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskCategory === category && styles.choiceTextSelected]}>{category}</Text></Pressable>
-              ))}
+            {voiceStep && <View style={styles.voiceWizardCard}><Text style={styles.voiceWizardLabel}>GUIDA VOCALE · {voiceStep === 'title' ? '1' : voiceStep === 'category' ? '2' : voiceStep === 'priority' ? '3' : voiceStep === 'duration' ? '4' : voiceStep === 'dueDate' ? '5' : '6'} DI 6</Text><Text style={styles.voiceWizardPrompt}>{voiceStepPrompts[voiceStep]}</Text><Text style={styles.voiceWizardState}>{isListening ? 'In ascolto…' : 'Tocca il microfono per ripetere.'}</Text></View>}
+            {voiceTranscript && <View style={styles.voiceTranscriptCard}><Text style={styles.voiceTranscriptLabel}>HAI DETTO</Text><Text style={styles.voiceTranscriptText}>{voiceTranscript}</Text></View>}
+            <View onLayout={(event) => rememberVoiceStepPosition('title', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'title' && styles.voiceStepSectionActive]}>
+              <Text style={styles.fieldLabel}>TITOLO DEL TASK</Text>
+              <View style={styles.voiceInputRow}>
+                <TextInput autoFocus placeholder="Es. Prenotare la visita" placeholderTextColor="#938F8B" value={newTaskTitle} onFocus={interruptVoiceGuide} onChangeText={(value) => { setNewTaskTitle(value); setVoiceSummary(null); }} onSubmitEditing={() => void addTask()} returnKeyType="done" style={[styles.input, styles.voiceTextInput]} />
+                <Pressable accessibilityRole="button" accessibilityLabel={isListening ? 'Ferma dettatura' : 'Avvia guida vocale'} onPress={toggleVoiceInput} style={[styles.voiceButton, isListening && styles.voiceButtonActive]}>
+                  <Text style={styles.voiceButtonIcon}>{isListening ? '■' : '🎙'}</Text>
+                </Pressable>
+              </View>
             </View>
-            <Text style={styles.fieldLabel}>PRIORITÀ</Text>
-            <View style={styles.optionRow}>
-              {(['Alta', 'Media', 'Bassa'] as Priority[]).map((priority) => (
-                <Pressable key={priority} onPress={() => setNewTaskPriority(priority)} style={[styles.choiceButton, newTaskPriority === priority && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskPriority === priority && styles.choiceTextSelected]}>{priority}</Text></Pressable>
-              ))}
+            <Text style={[styles.voiceHint, isListening && styles.voiceHintActive]}>{isListening ? 'Parla normalmente; Cadenza passa avanti quando riconosce la risposta.' : 'Tocca il microfono per completare titolo, categoria, priorità e durata.'}</Text>
+            {voiceSummary && <Text style={styles.voiceSummary}>{voiceSummary}</Text>}
+            <View onTouchStart={interruptVoiceGuide} onLayout={(event) => rememberVoiceStepPosition('category', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'category' && styles.voiceStepSectionActive]}>
+              <Text style={styles.fieldLabel}>CATEGORIA</Text>
+              <View style={styles.optionRow}>
+                {(['Personale', 'Lavoro'] as Category[]).map((category) => (
+                  <Pressable key={category} onPress={() => setNewTaskCategory(category)} style={[styles.choiceButton, newTaskCategory === category && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskCategory === category && styles.choiceTextSelected]}>{category}</Text></Pressable>
+                ))}
+              </View>
             </View>
-            <Text style={styles.fieldLabel}>DURATA STIMATA</Text>
-            <View style={styles.optionRow}>
-              {[15, 30, 45, 60].map((duration) => (
-                <Pressable key={duration} onPress={() => { setNewTaskDuration(duration); setIsCustomDuration(false); }} style={[styles.choiceButton, !isCustomDuration && newTaskDuration === duration && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !isCustomDuration && newTaskDuration === duration && styles.choiceTextSelected]}>{formatDuration(duration)}</Text></Pressable>
-              ))}
-              <Pressable onPress={() => setIsCustomDuration(true)} style={[styles.choiceButton, isCustomDuration && styles.choiceButtonSelected]}><Text style={[styles.choiceText, isCustomDuration && styles.choiceTextSelected]}>Altro</Text></Pressable>
+            <View onTouchStart={interruptVoiceGuide} onLayout={(event) => rememberVoiceStepPosition('priority', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'priority' && styles.voiceStepSectionActive]}>
+              <Text style={styles.fieldLabel}>PRIORITÀ</Text>
+              <View style={styles.optionRow}>
+                {(['Alta', 'Media', 'Bassa'] as Priority[]).map((priority) => (
+                  <Pressable key={priority} onPress={() => setNewTaskPriority(priority)} style={[styles.choiceButton, newTaskPriority === priority && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskPriority === priority && styles.choiceTextSelected]}>{priority}</Text></Pressable>
+                ))}
+              </View>
+            </View>
+            <View onTouchStart={interruptVoiceGuide} onLayout={(event) => rememberVoiceStepPosition('duration', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'duration' && styles.voiceStepSectionActive]}>
+              <Text style={styles.fieldLabel}>DURATA STIMATA</Text>
+              <View style={styles.optionRow}>
+                {[15, 30, 45, 60].map((duration) => (
+                  <Pressable key={duration} onPress={() => { setNewTaskDuration(duration); setIsCustomDuration(false); }} style={[styles.choiceButton, !isCustomDuration && newTaskDuration === duration && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !isCustomDuration && newTaskDuration === duration && styles.choiceTextSelected]}>{formatDuration(duration)}</Text></Pressable>
+                ))}
+                <Pressable onPress={() => setIsCustomDuration(true)} style={[styles.choiceButton, isCustomDuration && styles.choiceButtonSelected]}><Text style={[styles.choiceText, isCustomDuration && styles.choiceTextSelected]}>Altro</Text></Pressable>
+              </View>
             </View>
             {isCustomDuration && <View style={styles.customDurationRow}>
-              <View style={styles.durationField}><Text style={styles.durationLabel}>GIORNI</Text><TextInput keyboardType="number-pad" value={customDays} onChangeText={setCustomDays} style={styles.durationInput} /></View>
-              <View style={styles.durationField}><Text style={styles.durationLabel}>ORE</Text><TextInput keyboardType="number-pad" value={customHours} onChangeText={setCustomHours} style={styles.durationInput} /></View>
-              <View style={styles.durationField}><Text style={styles.durationLabel}>MINUTI</Text><TextInput keyboardType="number-pad" value={customMinutes} onChangeText={setCustomMinutes} style={styles.durationInput} /></View>
+              <View style={styles.durationField}><Text style={styles.durationLabel}>GIORNI</Text><TextInput keyboardType="number-pad" value={customDays} onFocus={interruptVoiceGuide} onChangeText={setCustomDays} style={styles.durationInput} /></View>
+              <View style={styles.durationField}><Text style={styles.durationLabel}>ORE</Text><TextInput keyboardType="number-pad" value={customHours} onFocus={interruptVoiceGuide} onChangeText={setCustomHours} style={styles.durationInput} /></View>
+              <View style={styles.durationField}><Text style={styles.durationLabel}>MINUTI</Text><TextInput keyboardType="number-pad" value={customMinutes} onFocus={interruptVoiceGuide} onChangeText={setCustomMinutes} style={styles.durationInput} /></View>
             </View>}
-            <Text style={styles.fieldLabel}>PUÒ ESSERE SPEZZATO?</Text>
-            <Text style={styles.dateHint}>Se scegli no, Cadenza lo pianifica solo quando trova uno spazio unico abbastanza lungo.</Text>
-            <View style={styles.optionRow}>
-              <Pressable onPress={() => setNewTaskSplittable(true)} style={[styles.choiceButton, newTaskSplittable && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskSplittable && styles.choiceTextSelected]}>Sì, in blocchi</Text></Pressable>
-              <Pressable onPress={() => setNewTaskSplittable(false)} style={[styles.choiceButton, !newTaskSplittable && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !newTaskSplittable && styles.choiceTextSelected]}>No, tutto insieme</Text></Pressable>
+            <View onTouchStart={interruptVoiceGuide}>
+              <Text style={styles.fieldLabel}>PUÒ ESSERE SPEZZATO?</Text>
+              <Text style={styles.dateHint}>Se scegli no, Cadenza lo pianifica solo quando trova uno spazio unico abbastanza lungo.</Text>
+              <View style={styles.optionRow}>
+                <Pressable onPress={() => setNewTaskSplittable(true)} style={[styles.choiceButton, newTaskSplittable && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskSplittable && styles.choiceTextSelected]}>Sì, in blocchi</Text></Pressable>
+                <Pressable onPress={() => setNewTaskSplittable(false)} style={[styles.choiceButton, !newTaskSplittable && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !newTaskSplittable && styles.choiceTextSelected]}>No, tutto insieme</Text></Pressable>
+              </View>
             </View>
-            <Text style={styles.fieldLabel}>GIORNO / SCADENZA</Text>
-            <Text style={styles.dateHint}>Con un orario resta fisso; senza orario Cadenza lo pianifica entro quel giorno.</Text>
-            <View style={styles.optionRow}>
-              {quickDateOptions.map((option) => (
-                <Pressable key={option.label} onPress={() => { setNewTaskDate(option.value); if (!option.value) setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDate === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDate === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
-              ))}
+            <View onLayout={(event) => rememberVoiceStepPosition('dueDate', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'dueDate' && styles.voiceStepSectionActive]}>
+              <Text style={styles.fieldLabel}>GIORNO / SCADENZA</Text>
+              <Text style={styles.dateHint}>Con un orario resta fisso; senza orario Cadenza lo pianifica entro quel giorno.</Text>
+              <View style={styles.optionRow}>
+                {quickDateOptions.map((option) => (
+                  <Pressable key={option.label} onPress={() => { interruptVoiceGuide(); setNewTaskDate(option.value); if (!option.value) setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDate === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDate === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
+                ))}
+              </View>
+              <Pressable onPress={() => { interruptVoiceGuide(); openCalendar(); }} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Calendario</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskDate) ?? 'Scegli un giorno'}</Text></Pressable>
             </View>
-            <Pressable onPress={openCalendar} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Calendario</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskDate) ?? 'Scegli un giorno'}</Text></Pressable>
             <Text style={styles.fieldLabel}>ORARIO <Text style={styles.optionalLabel}>FACOLTATIVO</Text></Text>
-            <TextInput keyboardType="number-pad" maxLength={5} placeholder="HH:MM  ·  es. 09:30" placeholderTextColor="#938F8B" value={newTaskTime} onChangeText={(value) => setNewTaskTime(formatTimeInput(value))} style={styles.input} />
+            <TextInput keyboardType="number-pad" maxLength={5} placeholder="HH:MM  ·  es. 09:30" placeholderTextColor="#938F8B" value={newTaskTime} onFocus={interruptVoiceGuide} onChangeText={(value) => setNewTaskTime(formatTimeInput(value))} style={styles.input} />
             <Text style={styles.fieldLabel}>FASCIA ORARIA FORZATA <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text>
             <Text style={styles.dateHint}>Cadenza pianificherà il task soltanto fra questi due orari.</Text>
             <View style={styles.taskTimeRangeRow}>
-              <TextInput keyboardType="number-pad" maxLength={5} placeholder="Dalle HH:MM" placeholderTextColor="#938F8B" value={newTaskWindowStart} onChangeText={(value) => setNewTaskWindowStart(formatTimeInput(value))} style={[styles.input, styles.taskTimeRangeInput]} />
-              <TextInput keyboardType="number-pad" maxLength={5} placeholder="Alle HH:MM" placeholderTextColor="#938F8B" value={newTaskWindowEnd} onChangeText={(value) => setNewTaskWindowEnd(formatTimeInput(value))} style={[styles.input, styles.taskTimeRangeInput]} />
+              <TextInput keyboardType="number-pad" maxLength={5} placeholder="Dalle HH:MM" placeholderTextColor="#938F8B" value={newTaskWindowStart} onFocus={interruptVoiceGuide} onChangeText={(value) => setNewTaskWindowStart(formatTimeInput(value))} style={[styles.input, styles.taskTimeRangeInput]} />
+              <TextInput keyboardType="number-pad" maxLength={5} placeholder="Alle HH:MM" placeholderTextColor="#938F8B" value={newTaskWindowEnd} onFocus={interruptVoiceGuide} onChangeText={(value) => setNewTaskWindowEnd(formatTimeInput(value))} style={[styles.input, styles.taskTimeRangeInput]} />
             </View>
-            <Pressable accessibilityRole="button" disabled={!newTaskTitle.trim() || isSaving} onPress={() => void addTask()} style={({ pressed }) => [styles.saveButton, (!newTaskTitle.trim() || isSaving) && styles.saveButtonDisabled, pressed && styles.saveButtonPressed]}>
+            <View onTouchStart={interruptVoiceGuide}>
+              <Text style={styles.fieldLabel}>PROMEMORIA</Text>
+              <View style={styles.optionRow}>
+                <Pressable onPress={() => setNewTaskReminderEnabled(true)} style={[styles.choiceButton, newTaskReminderEnabled && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskReminderEnabled && styles.choiceTextSelected]}>Sì</Text></Pressable>
+                <Pressable onPress={() => setNewTaskReminderEnabled(false)} style={[styles.choiceButton, !newTaskReminderEnabled && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !newTaskReminderEnabled && styles.choiceTextSelected]}>No</Text></Pressable>
+              </View>
+              {newTaskReminderEnabled && <><Text style={styles.fieldLabel}>QUANTI MINUTI PRIMA?</Text><View style={styles.optionRow}>{[0, 5, 10, 15, 30, 60].map((minutes) => <Pressable key={minutes} onPress={() => setNewTaskReminderMinutes(minutes)} style={[styles.choiceButton, newTaskReminderMinutes === minutes && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskReminderMinutes === minutes && styles.choiceTextSelected]}>{minutes ? `${minutes} min` : 'All’orario'}</Text></Pressable>)}</View></>}
+            </View>
+            <Pressable accessibilityRole="button" disabled={!newTaskTitle.trim() || isSaving} onPress={() => { interruptVoiceGuide(); void addTask(); }} style={({ pressed }) => [styles.saveButton, (!newTaskTitle.trim() || isSaving) && styles.saveButtonDisabled, pressed && styles.saveButtonPressed]}>
               {isSaving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.saveButtonText}>{editingTask ? 'Salva modifiche' : 'Salva task'}</Text>}
             </Pressable>
             </ScrollView>
@@ -601,6 +956,6 @@ const styles = StyleSheet.create({
   priorityPill: { borderRadius: 9, marginLeft: 8, paddingHorizontal: 8, paddingVertical: 5 }, priorityText: { fontSize: 11, fontWeight: '800' }, emptyText: { color: '#827E77', fontSize: 15, paddingTop: 10, textAlign: 'center' },
   addButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 18, bottom: 18, elevation: 2, flexDirection: 'row', justifyContent: 'center', left: 20, paddingVertical: 17, position: 'absolute', right: 20, shadowColor: '#17392A', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.18, shadowRadius: 12 }, addButtonPressed: { backgroundColor: '#274E3D' }, addIcon: { color: '#FFFFFF', fontSize: 23, fontWeight: '300', lineHeight: 23, marginRight: 8 }, addButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
   modalBackdrop: { backgroundColor: 'rgba(24, 28, 24, 0.38)', flex: 1, justifyContent: 'flex-end' }, modalDismissArea: { bottom: 0, left: 0, position: 'absolute', right: 0, top: 0 }, modalCard: { backgroundColor: '#F8F7F3', borderTopLeftRadius: 28, borderTopRightRadius: 28, height: '92%', maxHeight: '92%', minHeight: 0 }, modalScroller: { flex: 1 }, modalScrollContent: { flexGrow: 1, paddingBottom: 48, paddingHorizontal: 22, paddingTop: 10 }, modalHandle: { alignSelf: 'center', backgroundColor: '#D3D0C9', borderRadius: 2, height: 4, marginBottom: 23, width: 38 }, modalTitle: { color: '#292D29', fontSize: 25, fontWeight: '700', letterSpacing: -0.5 }, modalSubtitle: { color: '#77736D', fontSize: 14, lineHeight: 20, marginTop: 7 },
-  input: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 14, borderWidth: 1, color: '#292D29', fontSize: 16, marginTop: 18, paddingHorizontal: 15, paddingVertical: 15 }, fieldLabel: { color: '#6C716B', fontSize: 10, fontWeight: '800', letterSpacing: 1.05, marginBottom: 8, marginTop: 16 }, optionalLabel: { color: '#A19C94', fontSize: 9 }, dateHint: { color: '#8A857E', fontSize: 11, lineHeight: 16, marginBottom: 9, marginTop: -2 }, optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceButton: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 9 }, choiceButtonSelected: { backgroundColor: '#E4F0E5', borderColor: '#3F725B' }, choiceText: { color: '#716D66', fontSize: 13, fontWeight: '700' }, choiceTextSelected: { color: '#315D4A' }, customDurationRow: { flexDirection: 'row', gap: 8, marginTop: 10 }, durationField: { flex: 1 }, durationLabel: { color: '#78736C', fontSize: 9, fontWeight: '800', letterSpacing: 0.8, marginBottom: 5 }, durationInput: { backgroundColor: '#FFFFFF', borderColor: '#D7D3CC', borderRadius: 10, borderWidth: 1, color: '#292D29', fontSize: 16, paddingHorizontal: 11, paddingVertical: 10, textAlign: 'center' }, calendarButton: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 13, paddingVertical: 12 }, calendarButtonLabel: { color: '#5F6B63', fontSize: 13, fontWeight: '700' }, calendarButtonValue: { color: '#305D4A', fontSize: 13, fontWeight: '800' }, taskTimeRangeRow: { flexDirection: 'row', gap: 8 }, taskTimeRangeInput: { flex: 1, marginTop: 0, paddingHorizontal: 10, textAlign: 'center' }, saveButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 14, justifyContent: 'center', marginTop: 22, minHeight: 53 }, saveButtonDisabled: { backgroundColor: '#A8BBAE' }, saveButtonPressed: { opacity: 0.85 }, saveButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+  input: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 14, borderWidth: 1, color: '#292D29', fontSize: 16, marginTop: 18, paddingHorizontal: 15, paddingVertical: 15 }, voiceWizardCard: { backgroundColor: '#305D4A', borderRadius: 14, marginTop: 16, padding: 13 }, voiceWizardLabel: { color: '#C6DBC9', fontSize: 9, fontWeight: '800', letterSpacing: 1 }, voiceWizardPrompt: { color: '#FFFFFF', fontSize: 15, fontWeight: '700', lineHeight: 21, marginTop: 4 }, voiceWizardState: { color: '#DCEADE', fontSize: 11, marginTop: 5 }, voiceTranscriptCard: { backgroundColor: '#F0F2FF', borderColor: '#BBC5F1', borderRadius: 12, borderWidth: 1, marginTop: 16, padding: 11 }, voiceTranscriptLabel: { color: '#3850A3', fontSize: 9, fontWeight: '800', letterSpacing: 1 }, voiceTranscriptText: { color: '#343B62', fontSize: 13, lineHeight: 19, marginTop: 4 }, voiceStepSection: { borderRadius: 14, marginHorizontal: -8, paddingHorizontal: 8 }, voiceStepSectionActive: { backgroundColor: '#E8F3EC', borderColor: '#9FBEA8', borderWidth: 1, marginTop: 10, paddingBottom: 12, paddingHorizontal: 12 }, voiceInputRow: { alignItems: 'center', flexDirection: 'row', gap: 9, marginTop: 8 }, voiceTextInput: { flex: 1, marginTop: 0 }, voiceButton: { alignItems: 'center', backgroundColor: '#E4F0E5', borderColor: '#7FA18A', borderRadius: 14, borderWidth: 1, height: 53, justifyContent: 'center', marginTop: 0, width: 53 }, voiceButtonActive: { backgroundColor: '#B54708', borderColor: '#B54708' }, voiceButtonIcon: { color: '#305D4A', fontSize: 22, lineHeight: 24 }, voiceHint: { color: '#8A857E', fontSize: 11, lineHeight: 16, marginTop: 7 }, voiceHintActive: { color: '#B54708', fontWeight: '700' }, voiceSummary: { backgroundColor: '#E8F3EC', borderRadius: 9, color: '#315D4A', fontSize: 11, fontWeight: '700', lineHeight: 16, marginTop: 8, paddingHorizontal: 10, paddingVertical: 8 }, fieldLabel: { color: '#6C716B', fontSize: 10, fontWeight: '800', letterSpacing: 1.05, marginBottom: 8, marginTop: 16 }, optionalLabel: { color: '#A19C94', fontSize: 9 }, dateHint: { color: '#8A857E', fontSize: 11, lineHeight: 16, marginBottom: 9, marginTop: -2 }, optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceButton: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 9 }, choiceButtonSelected: { backgroundColor: '#E4F0E5', borderColor: '#3F725B' }, choiceText: { color: '#716D66', fontSize: 13, fontWeight: '700' }, choiceTextSelected: { color: '#315D4A' }, customDurationRow: { flexDirection: 'row', gap: 8, marginTop: 10 }, durationField: { flex: 1 }, durationLabel: { color: '#78736C', fontSize: 9, fontWeight: '800', letterSpacing: 0.8, marginBottom: 5 }, durationInput: { backgroundColor: '#FFFFFF', borderColor: '#D7D3CC', borderRadius: 10, borderWidth: 1, color: '#292D29', fontSize: 16, paddingHorizontal: 11, paddingVertical: 10, textAlign: 'center' }, calendarButton: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 13, paddingVertical: 12 }, calendarButtonLabel: { color: '#5F6B63', fontSize: 13, fontWeight: '700' }, calendarButtonValue: { color: '#305D4A', fontSize: 13, fontWeight: '800' }, taskTimeRangeRow: { flexDirection: 'row', gap: 8 }, taskTimeRangeInput: { flex: 1, marginTop: 0, paddingHorizontal: 10, textAlign: 'center' }, saveButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 14, justifyContent: 'center', marginTop: 22, minHeight: 53 }, saveButtonDisabled: { backgroundColor: '#A8BBAE' }, saveButtonPressed: { opacity: 0.85 }, saveButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
   calendarBackdrop: { alignItems: 'center', backgroundColor: 'rgba(24, 28, 24, 0.42)', flex: 1, justifyContent: 'center', padding: 20 }, calendarCard: { backgroundColor: '#F8F7F3', borderRadius: 24, maxWidth: 420, padding: 20, width: '100%' }, calendarHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 }, calendarArrow: { alignItems: 'center', height: 36, justifyContent: 'center', width: 36 }, calendarArrowText: { color: '#305D4A', fontSize: 32, fontWeight: '300', lineHeight: 34 }, calendarTitle: { color: '#292D29', fontSize: 17, fontWeight: '800' }, weekdayRow: { flexDirection: 'row', marginBottom: 6 }, weekday: { color: '#88837C', flex: 1, fontSize: 11, fontWeight: '800', textAlign: 'center' }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' }, calendarDay: { alignItems: 'center', borderRadius: 18, height: 36, justifyContent: 'center', marginVertical: 2, width: '14.2857%' }, calendarDayToday: { borderColor: '#87A590', borderWidth: 1 }, calendarDaySelected: { backgroundColor: '#305D4A' }, calendarDayText: { color: '#383C38', fontSize: 14, fontWeight: '700' }, calendarDayTextSelected: { color: '#FFFFFF' }, backlogButton: { alignItems: 'center', marginTop: 16, paddingVertical: 9 }, backlogButtonText: { color: '#765D00', fontSize: 13, fontWeight: '800' },
 });
