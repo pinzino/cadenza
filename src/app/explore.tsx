@@ -147,6 +147,9 @@ export default function PlanScreen() {
   async function completeTaskFromPlan(taskId: string) {
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return;
+    const checklistResult = await supabase.from('task_checklist_items').select('id, is_complete').eq('task_id', taskId);
+    if (checklistResult.error) { Alert.alert('Aggiornamento non riuscito', 'Controlla gli aggiornamenti SQL in Supabase e riprova.'); return; }
+    if (checklistResult.data.some((item) => !item.is_complete)) { Alert.alert('Checklist da completare', 'Spunta tutti i punti della checklist prima di completare il task.'); return; }
     const { error } = await supabase.from('tasks').update({ is_complete: true }).eq('id', taskId);
     if (error) { Alert.alert('Aggiornamento non riuscito', 'Riprova tra poco.'); return; }
     await supabase.from('task_blocks').delete().eq('task_id', taskId);
