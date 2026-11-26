@@ -16,15 +16,17 @@ import {
 } from 'react-native';
 import type { ScrollViewInstance } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
 import { AuthScreen } from '@/components/auth-screen';
 import { formatTimeInput, timeToMinutes } from '@/lib/planner';
+import { useCurrentTime } from '@/lib/use-current-time';
 import { supabase } from '@/lib/supabase';
 
 type Priority = 'Alta' | 'Media' | 'Bassa';
 type Category = 'Lavoro' | 'Personale';
+type DateKind = 'exact' | 'deadline';
 type RecurrenceRule = 'none' | 'weekly' | 'biweekly' | 'monthly';
 type TaskType = 'task' | 'note' | 'checklist';
 type VoiceStep = 'title' | 'category' | 'priority' | 'duration' | 'dueDate' | 'timeChoice' | 'time' | 'save';
@@ -39,6 +41,7 @@ type Task = {
   duration_minutes: number;
   priority: Priority;
   scheduled_date: string | null;
+  scheduled_date_kind: DateKind;
   scheduled_time: string | null;
   scheduled_window_start: string | null;
   scheduled_window_end: string | null;
@@ -47,6 +50,7 @@ type Task = {
   reminder_enabled: boolean;
   reminder_minutes: number;
   recurrence_rule: RecurrenceRule;
+  recurrence_end_date: string | null;
   task_type: TaskType;
   notes: string | null;
   checklist_items: ChecklistItem[];
@@ -116,14 +120,22 @@ function toDateKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
+function formatDayMonth(date: Date) {
+  return new Intl.DateTimeFormat('it-IT', { day: 'numeric', month: 'short' }).format(date);
+}
+
 function formatScheduledDate(value: string | null) {
   if (!value) return null;
   const today = toDateKey(new Date());
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  if (value === today) return 'Oggi';
-  if (value === toDateKey(tomorrow)) return 'Domani';
-  return new Intl.DateTimeFormat('it-IT', { day: 'numeric', month: 'short' }).format(new Date(`${value}T12:00:00`));
+  const day = new Date(`${value}T12:00:00`);
+  if (value === today) return `Oggi ${formatDayMonth(day)}`;
+  if (value === toDateKey(tomorrow)) return `Domani ${formatDayMonth(day)}`;
+  const dayAfterTomorrow = new Date();
+  dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
+  if (value === toDateKey(dayAfterTomorrow)) return `Dopodomani ${formatDayMonth(day)}`;
+  return formatDayMonth(day);
 }
 
 function dateFromKey(value: string) {
@@ -155,11 +167,13 @@ function toStoredTime(value: string) {
   return match ? `${time}:00` : undefined;
 }
 
-function recurrenceDates(startDate: string, rule: RecurrenceRule) {
+function recurrenceDates(startDate: string, rule: RecurrenceRule, endDate: string | null) {
   if (rule === 'none') return [startDate];
   const firstDate = dateFromKey(startDate);
   const horizon = new Date(firstDate);
   horizon.setDate(horizon.getDate() + 90);
+  const endLimit = endDate ? dateFromKey(endDate) : horizon;
+  const limit = endLimit < horizon ? endLimit : horizon;
   const dates = [startDate];
 
   if (rule === 'monthly') {
@@ -168,7 +182,7 @@ function recurrenceDates(startDate: string, rule: RecurrenceRule) {
       const month = firstDate.getMonth() + monthOffset;
       const finalDay = new Date(year, month + 1, 0).getDate();
       const candidate = new Date(year, month, Math.min(firstDate.getDate(), finalDay));
-      if (candidate > horizon) break;
+      if (candidate > limit) break;
       dates.push(toDateKey(candidate));
     }
     return dates;
@@ -178,7 +192,7 @@ function recurrenceDates(startDate: string, rule: RecurrenceRule) {
   for (let offset = intervalDays; ; offset += intervalDays) {
     const candidate = new Date(firstDate);
     candidate.setDate(candidate.getDate() + offset);
-    if (candidate > horizon) break;
+    if (candidate > limit) break;
     dates.push(toDateKey(candidate));
   }
   return dates;
@@ -355,7 +369,7 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
               <Text style={styles.taskMetaText}>{formatDuration(task.duration_minutes)}</Text>
               <Text style={styles.metaDot}>•</Text>
               <Text style={[styles.taskMetaText, task.category === 'Lavoro' ? styles.workTaskCategory : styles.personalTaskCategory]}>{task.category}</Text>
-              {scheduledDate && <><Text style={styles.metaDot}>•</Text><Text style={styles.taskMetaText}>{scheduledDate}</Text></>}
+              {scheduledDate && <><Text style={styles.metaDot}>•</Text><Text style={styles.taskMetaText}>{task.scheduled_date_kind === 'deadline' ? `Entro ${scheduledDate.toLowerCase()}` : scheduledDate}</Text></>}
               {task.recurrence_rule !== 'none' && <><Text style={styles.metaDot}>•</Text><Text style={styles.taskMetaText}>{recurrenceLabel(task.recurrence_rule)}</Text></>}
             </View>
             {task.task_type === 'note' && task.notes && <Text numberOfLines={2} style={styles.taskNotesPreview}>{task.notes}</Text>}
@@ -369,9 +383,13 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
 }
 
 export default function HomeScreen() {
+  const now = useCurrentTime();
+  const { editTaskId } = useLocalSearchParams<{ editTaskId?: string }>();
+  const todayKey = toDateKey(now);
   const [session, setSession] = useState<Session | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [agendaTaskIds, setAgendaTaskIds] = useState<Set<string>>(new Set());
   const [isLoadingTasks, setIsLoadingTasks] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isComposerOpen, setIsComposerOpen] = useState(false);
@@ -390,15 +408,18 @@ export default function HomeScreen() {
   const [customHours, setCustomHours] = useState('1');
   const [customMinutes, setCustomMinutes] = useState('0');
   const [newTaskDate, setNewTaskDate] = useState<string | null>(toDateKey(new Date()));
+  const [newTaskDateKind, setNewTaskDateKind] = useState<DateKind>('deadline');
   const [newTaskTime, setNewTaskTime] = useState('');
   const [newTaskWindowStart, setNewTaskWindowStart] = useState('');
   const [newTaskWindowEnd, setNewTaskWindowEnd] = useState('');
   const [newTaskRecurrence, setNewTaskRecurrence] = useState<RecurrenceRule>('none');
+  const [newTaskRecurrenceEndDate, setNewTaskRecurrenceEndDate] = useState<string | null>(null);
   const [newTaskReminderEnabled, setNewTaskReminderEnabled] = useState(true);
   const [newTaskReminderMinutes, setNewTaskReminderMinutes] = useState(10);
   const [defaultReminderEnabled, setDefaultReminderEnabled] = useState(true);
   const [defaultReminderMinutes, setDefaultReminderMinutes] = useState(10);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const [calendarTarget, setCalendarTarget] = useState<'taskDate' | 'recurrenceEnd'>('taskDate');
   const [calendarCursor, setCalendarCursor] = useState(new Date());
   const [isSaving, setIsSaving] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -504,6 +525,7 @@ export default function HomeScreen() {
       recognizedLabel = 'Nessun orario fissato';
     } else if (currentStep === 'time' && details.time) {
       setNewTaskTime(details.time);
+      setNewTaskDateKind('exact');
       accepted = true;
       nextStep = 'save';
       recognizedLabel = `Orario: ${details.time}`;
@@ -614,15 +636,18 @@ export default function HomeScreen() {
   }, [voiceStep]);
 
   const quickDateOptions = useMemo(() => {
-    const today = new Date();
-    const tomorrow = new Date();
+    const today = new Date(`${todayKey}T12:00:00`);
+    const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
+    const dayAfterTomorrow = new Date(today);
+    dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
     return [
-      { label: 'Oggi', value: toDateKey(today) },
-      { label: 'Domani', value: toDateKey(tomorrow) },
+      { label: `Oggi ${formatDayMonth(today)}`, value: toDateKey(today) },
+      { label: `Domani ${formatDayMonth(tomorrow)}`, value: toDateKey(tomorrow) },
+      { label: `Dopodomani ${formatDayMonth(dayAfterTomorrow)}`, value: toDateKey(dayAfterTomorrow) },
       { label: 'Senza data', value: null },
     ];
-  }, []);
+  }, [todayKey]);
 
   useEffect(() => {
     let isMounted = true;
@@ -649,19 +674,21 @@ export default function HomeScreen() {
     if (!session) return;
     setIsLoadingTasks(true);
     setErrorMessage(null);
-    const [tasksResult, settingsResult, checklistResult] = await Promise.all([
-      supabase.from('tasks').select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, task_type, notes').order('scheduled_date', { ascending: true, nullsFirst: false }).order('scheduled_time', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true }),
+    const [tasksResult, settingsResult, checklistResult, blocksResult] = await Promise.all([
+      supabase.from('tasks').select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes').order('scheduled_date', { ascending: true, nullsFirst: false }).order('scheduled_time', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true }),
       supabase.from('planner_settings').select('reminder_default_enabled, reminder_default_minutes').eq('user_id', session.user.id).maybeSingle(),
       supabase.from('task_checklist_items').select('id, task_id, title, is_complete, position').order('position'),
+      supabase.from('task_blocks').select('task_id'),
     ]);
     const { data, error } = tasksResult;
 
-    if (error || checklistResult.error) {
-      setErrorMessage('Non riesco ancora a leggere i task. Esegui gli aggiornamenti SQL in Supabase.');
+    if (error || checklistResult.error || blocksResult.error) {
+      setErrorMessage('Non riesco a leggere i task o l’agenda. Controlla le migrazioni Supabase.');
     } else {
       const itemsByTask = new Map<string, ChecklistItem[]>();
       (checklistResult.data as ChecklistItem[]).forEach((item) => itemsByTask.set(item.task_id, [...(itemsByTask.get(item.task_id) ?? []), item]));
       setTasks((data as Omit<Task, 'checklist_items'>[]).map((task) => ({ ...task, checklist_items: itemsByTask.get(task.id) ?? [] })));
+      setAgendaTaskIds(new Set((blocksResult.data ?? []).map((block) => block.task_id)));
       if (settingsResult.data) {
         setDefaultReminderEnabled(settingsResult.data.reminder_default_enabled);
         setDefaultReminderMinutes(settingsResult.data.reminder_default_minutes);
@@ -674,12 +701,10 @@ export default function HomeScreen() {
     if (session) void loadTasks();
   }, [loadTasks, session]));
 
-  const plannedMinutes = useMemo(
-    () => tasks.filter((task) => !task.is_complete && task.scheduled_date).reduce((total, task) => total + task.duration_minutes, 0),
-    [tasks],
-  );
-  const plannedTasks = useMemo(() => tasks.filter((task) => task.scheduled_date), [tasks]);
-  const backlogTasks = useMemo(() => tasks.filter((task) => !task.scheduled_date), [tasks]);
+  const unplannedTasks = useMemo(() => tasks.filter((task) => !agendaTaskIds.has(task.id)), [agendaTaskIds, tasks]);
+  const unplannedMinutes = useMemo(() => unplannedTasks.filter((task) => !task.is_complete).reduce((total, task) => total + task.duration_minutes, 0), [unplannedTasks]);
+  const datedUnplannedTasks = useMemo(() => unplannedTasks.filter((task) => task.scheduled_date), [unplannedTasks]);
+  const undatedUnplannedTasks = useMemo(() => unplannedTasks.filter((task) => !task.scheduled_date), [unplannedTasks]);
 
   async function addTask() {
     const title = newTaskTitle.trim();
@@ -718,6 +743,10 @@ export default function HomeScreen() {
       Alert.alert('Scegli un giorno', 'Per ripetere un task, scegli il primo giorno della serie.');
       return;
     }
+    if (newTaskRecurrenceEndDate && (!newTaskDate || newTaskRecurrenceEndDate < newTaskDate)) {
+      Alert.alert('Fine ripetizione non valida', 'Scegli una data uguale o successiva al primo giorno del task.');
+      return;
+    }
     if (scheduledWindowStart && (!newTaskDate || timeToMinutes(scheduledWindowStart) >= timeToMinutes(scheduledWindowEnd!))) {
       Alert.alert('Fascia oraria non valida', !newTaskDate ? 'Una fascia oraria richiede anche un giorno.' : 'La fine della fascia deve essere dopo l’inizio.');
       return;
@@ -736,6 +765,7 @@ export default function HomeScreen() {
       duration_minutes: durationMinutes,
       priority: newTaskPriority,
       scheduled_date: newTaskDate,
+      scheduled_date_kind: scheduledTime ? 'exact' : newTaskDateKind,
       scheduled_time: scheduledTime,
       scheduled_window_start: scheduledWindowStart,
       scheduled_window_end: scheduledWindowEnd,
@@ -743,12 +773,13 @@ export default function HomeScreen() {
       reminder_enabled: newTaskReminderEnabled,
       reminder_minutes: newTaskReminderMinutes,
       recurrence_rule: newTaskRecurrence,
+      recurrence_end_date: newTaskRecurrence === 'none' ? null : newTaskRecurrenceEndDate,
       is_unscheduled: false,
       planning_note: null,
     };
-    const selectedFields = 'id, title, category, duration_minutes, priority, scheduled_date, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, task_type, notes';
+    const selectedFields = 'id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes';
     const recurringTaskValues = !editingTask && newTaskRecurrence !== 'none' && newTaskDate
-      ? recurrenceDates(newTaskDate, newTaskRecurrence).map((scheduledDate) => ({ user_id: session.user.id, ...taskValues, scheduled_date: scheduledDate }))
+      ? recurrenceDates(newTaskDate, newTaskRecurrence, newTaskRecurrenceEndDate).map((scheduledDate) => ({ user_id: session.user.id, ...taskValues, scheduled_date: scheduledDate }))
       : null;
     const result = editingTask
       ? await supabase.from('tasks').update(taskValues).eq('id', editingTask.id)
@@ -759,7 +790,7 @@ export default function HomeScreen() {
     setIsSaving(false);
 
     if (error) {
-      Alert.alert('Task non salvato', 'Controlla di aver eseguito lo script schema.sql nel SQL Editor di Supabase.');
+      Alert.alert('Task non salvato', 'Controlla le migrazioni Supabase, inclusa la 015, e riprova.');
       return;
     }
 
@@ -804,10 +835,12 @@ export default function HomeScreen() {
     setCustomHours('1');
     setCustomMinutes('0');
     setNewTaskDate(toDateKey(new Date()));
+    setNewTaskDateKind('deadline');
     setNewTaskTime('');
     setNewTaskWindowStart('');
     setNewTaskWindowEnd('');
     setNewTaskRecurrence('none');
+    setNewTaskRecurrenceEndDate(null);
     setNewTaskReminderEnabled(defaultReminderEnabled);
     setNewTaskReminderMinutes(defaultReminderMinutes);
     setVoiceSummary(null);
@@ -817,7 +850,7 @@ export default function HomeScreen() {
     setIsComposerOpen(true);
   }
 
-  function openEditTask(task: Task) {
+  const openEditTask = useCallback((task: Task) => {
     setEditingTask(task);
     setNewTaskTitle(task.title);
     setNewTaskType(task.task_type);
@@ -827,10 +860,12 @@ export default function HomeScreen() {
     setNewTaskCategory(task.category);
     setNewTaskPriority(task.priority);
     setNewTaskDate(task.scheduled_date);
+    setNewTaskDateKind(task.scheduled_date_kind);
     setNewTaskTime(task.scheduled_time?.slice(0, 5) ?? '');
     setNewTaskWindowStart(task.scheduled_window_start?.slice(0, 5) ?? '');
     setNewTaskWindowEnd(task.scheduled_window_end?.slice(0, 5) ?? '');
     setNewTaskRecurrence(task.recurrence_rule);
+    setNewTaskRecurrenceEndDate(task.recurrence_end_date);
     setNewTaskReminderEnabled(task.reminder_enabled);
     setNewTaskReminderMinutes(task.reminder_minutes);
     setVoiceSummary(null);
@@ -851,15 +886,30 @@ export default function HomeScreen() {
       setIsCustomDuration(true);
     }
     setIsComposerOpen(true);
-  }
+  }, []);
 
-  function openCalendar() {
-    setCalendarCursor(newTaskDate ? dateFromKey(newTaskDate) : new Date());
+  useEffect(() => {
+    if (!editTaskId || isLoadingTasks) return;
+    const task = tasks.find((item) => item.id === editTaskId);
+    if (!task) return;
+    const openTimer = setTimeout(() => {
+      openEditTask(task);
+      router.setParams({ editTaskId: '' });
+    }, 0);
+    return () => clearTimeout(openTimer);
+  }, [editTaskId, isLoadingTasks, openEditTask, tasks]);
+
+  function openCalendar(target: 'taskDate' | 'recurrenceEnd' = 'taskDate') {
+    setCalendarTarget(target);
+    const selectedDate = target === 'taskDate' ? newTaskDate : newTaskRecurrenceEndDate;
+    setCalendarCursor(selectedDate ? dateFromKey(selectedDate) : newTaskDate ? dateFromKey(newTaskDate) : new Date());
     setIsCalendarOpen(true);
   }
 
   function chooseDate(date: Date) {
-    setNewTaskDate(toDateKey(date));
+    const selectedDate = toDateKey(date);
+    if (calendarTarget === 'recurrenceEnd') setNewTaskRecurrenceEndDate(selectedDate);
+    else setNewTaskDate(selectedDate);
     setIsCalendarOpen(false);
   }
 
@@ -916,8 +966,6 @@ export default function HomeScreen() {
     if (error) {
       setTasks((currentTasks) => currentTasks.map((item) => (item.id === task.id ? task : item)));
       Alert.alert('Aggiornamento non riuscito', 'Riprova tra poco.');
-    } else if (nextCompletedValue) {
-      await supabase.from('task_blocks').delete().eq('task_id', task.id);
     }
   }
 
@@ -946,7 +994,7 @@ export default function HomeScreen() {
     <View style={styles.screen}>
       <SafeAreaView style={styles.safeArea} edges={['top']}>
         <FlatList
-          data={plannedTasks}
+          data={datedUnplannedTasks}
           keyExtractor={(task) => task.id}
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
@@ -957,8 +1005,9 @@ export default function HomeScreen() {
               <View style={styles.header}>
                 <View>
                   <Text style={styles.eyebrow}>CADENZA</Text>
-                  <Text style={styles.title}>La tua giornata</Text>
+                  <Text style={styles.title}>Pianifica</Text>
                   <Text style={styles.date}>{todayLabel}</Text>
+                  <Text style={styles.currentTime}>Ora attuale {new Intl.DateTimeFormat('it-IT', { hour: '2-digit', minute: '2-digit' }).format(now)}</Text>
                 </View>
                 <Pressable accessibilityLabel="Esci dall'account" onPress={() => void signOut()} style={styles.avatar}>
                   <Text style={styles.avatarText}>{session.user.email?.slice(0, 1).toUpperCase() ?? 'C'}</Text>
@@ -967,31 +1016,31 @@ export default function HomeScreen() {
 
               <View style={styles.focusCard}>
                 <View style={styles.focusCopy}>
-                  <Text style={styles.focusLabel}>IL TUO RITMO DI OGGI</Text>
+                  <Text style={styles.focusLabel}>DA ORGANIZZARE</Text>
                   <Text style={styles.focusTitle}>Un passo alla volta.</Text>
-                  <Text style={styles.focusDescription}>{plannedMinutes} minuti da dedicare a te.</Text>
+                  <Text style={styles.focusDescription}>{unplannedMinutes} minuti ancora da pianificare.</Text>
                 </View>
                 <View style={styles.focusCircle}>
-                  <Text style={styles.focusCircleNumber}>{plannedTasks.filter((task) => !task.is_complete).length}</Text>
-                  <Text style={styles.focusCircleLabel}>oggi</Text>
+                  <Text style={styles.focusCircleNumber}>{unplannedTasks.filter((task) => !task.is_complete).length}</Text>
+                  <Text style={styles.focusCircleLabel}>da fare</Text>
                 </View>
               </View>
 
               <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Pianificati</Text>
-                <Text style={styles.sectionCount}>{plannedTasks.length} task</Text>
+                <Text style={styles.sectionTitle}>Con una data</Text>
+                <Text style={styles.sectionCount}>{datedUnplannedTasks.length} task</Text>
               </View>
 
               {errorMessage && <Text style={styles.errorText}>{errorMessage}</Text>}
             </>
           }
           renderItem={({ item: task }) => <SwipeableTask task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => void deleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />}
-          ListEmptyComponent={!isLoadingTasks ? <Text style={styles.emptyText}>Nessun task pianificato. Scegli un giorno per iniziare.</Text> : undefined}
+          ListEmptyComponent={!isLoadingTasks ? <Text style={styles.emptyText}>Nessun task con data da inserire nell’agenda.</Text> : undefined}
           ListFooterComponent={<View style={styles.backlogSection}>
-            <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Note sparse</Text><Text style={styles.sectionCount}>{backlogTasks.length} task</Text></View>
+            <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Senza data</Text><Text style={styles.sectionCount}>{undatedUnplannedTasks.length} task</Text></View>
             <Text style={styles.backlogDescription}>Cose da fare che devono ancora trovare posto nello spartito.</Text>
-            {backlogTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => void deleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
-            {!backlogTasks.length && <Text style={styles.emptyText}>Tutto accordato. Che armonia!</Text>}
+            {undatedUnplannedTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => void deleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
+            {!undatedUnplannedTasks.length && <Text style={styles.emptyText}>Nessun task senza data.</Text>}
           </View>}
         />
 
@@ -1007,7 +1056,7 @@ export default function HomeScreen() {
             <ScrollView ref={composerScrollRef} style={styles.modalScroller} contentContainerStyle={styles.modalScrollContent} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled" nestedScrollEnabled showsVerticalScrollIndicator>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>{editingTask ? 'Modifica task' : 'Nuovo task'}</Text>
-            <Text style={styles.modalSubtitle}>Pianificalo oppure lascialo tra le note sparse.</Text>
+            <Text style={styles.modalSubtitle}>Scegli quando farlo oppure lascialo senza data.</Text>
             {voiceStep && <View style={styles.voiceWizardCard}><Text style={styles.voiceWizardLabel}>GUIDA VOCALE · {voiceStep === 'title' ? '1' : voiceStep === 'category' ? '2' : voiceStep === 'priority' ? '3' : voiceStep === 'duration' ? '4' : voiceStep === 'dueDate' ? '5' : voiceStep === 'timeChoice' ? '6' : voiceStep === 'time' ? '7' : '8'} DI 8</Text><Text style={styles.voiceWizardPrompt}>{voiceStepPrompts[voiceStep]}</Text><Text style={styles.voiceWizardState}>{isListening ? 'In ascolto…' : 'Tocca il microfono per ripetere.'}</Text></View>}
             {voiceTranscript && <View style={styles.voiceTranscriptCard}><Text style={styles.voiceTranscriptLabel}>HAI DETTO</Text><Text style={styles.voiceTranscriptText}>{voiceTranscript}</Text></View>}
             <View onLayout={(event) => rememberVoiceStepPosition('title', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'title' && styles.voiceStepSectionActive]}>
@@ -1073,26 +1122,31 @@ export default function HomeScreen() {
             </View>
             <View onLayout={(event) => rememberVoiceStepPosition('dueDate', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'dueDate' && styles.voiceStepSectionActive]}>
               <Text style={styles.fieldLabel}>GIORNO / SCADENZA</Text>
-              <Text style={styles.dateHint}>Con un orario resta fisso; senza orario Cadenza lo pianifica entro quel giorno.</Text>
+              <Text style={styles.dateHint}>Scegli il giorno preciso oppure una scadenza entro cui completarlo.</Text>
               <View style={styles.optionRow}>
                 {quickDateOptions.map((option) => (
                   <Pressable key={option.label} onPress={() => { interruptVoiceGuide(); setNewTaskDate(option.value); if (!option.value) setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDate === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDate === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
                 ))}
               </View>
               <Pressable onPress={() => { interruptVoiceGuide(); openCalendar(); }} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Calendario</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskDate) ?? 'Scegli un giorno'}</Text></Pressable>
+              {newTaskDate && <View style={styles.optionRow}>
+                <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskDateKind('exact'); }} style={[styles.choiceButton, newTaskDateKind === 'exact' && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDateKind === 'exact' && styles.choiceTextSelected]}>Proprio quel giorno</Text></Pressable>
+                <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskDateKind('deadline'); setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDateKind === 'deadline' && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDateKind === 'deadline' && styles.choiceTextSelected]}>Entro quel giorno</Text></Pressable>
+              </View>}
             </View>
             <View onLayout={(event) => rememberVoiceStepPosition('time', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'time' && styles.voiceStepSectionActive]}>
               <Text style={styles.fieldLabel}>ORARIO <Text style={styles.optionalLabel}>FACOLTATIVO</Text></Text>
-              <TextInput keyboardType="number-pad" maxLength={5} placeholder="HH:MM  ·  es. 09:30" placeholderTextColor="#938F8B" value={newTaskTime} onFocus={interruptVoiceGuide} onChangeText={(value) => setNewTaskTime(formatTimeInput(value))} style={styles.input} />
+              <TextInput keyboardType="number-pad" maxLength={5} placeholder="HH:MM  ·  es. 09:30" placeholderTextColor="#938F8B" value={newTaskTime} onFocus={interruptVoiceGuide} onChangeText={(value) => { setNewTaskTime(formatTimeInput(value)); if (value) setNewTaskDateKind('exact'); }} style={styles.input} />
             </View>
             <View onTouchStart={interruptVoiceGuide}>
               <Text style={styles.fieldLabel}>RIPETIZIONE</Text>
-              <Text style={styles.dateHint}>Cadenza crea le prossime occorrenze nei successivi 90 giorni.</Text>
+              <Text style={styles.dateHint}>{newTaskRecurrence === 'none' ? 'Puoi rendere il task ricorrente.' : 'Scegli fino a quando ripeterlo, altrimenti Cadenza crea al massimo 90 giorni di occorrenze.'}</Text>
               <View style={styles.optionRow}>
                 {recurrenceOptions.map((option) => (
-                  <Pressable key={option.value} onPress={() => setNewTaskRecurrence(option.value)} style={[styles.choiceButton, newTaskRecurrence === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskRecurrence === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
+                  <Pressable key={option.value} onPress={() => { setNewTaskRecurrence(option.value); if (option.value === 'none') setNewTaskRecurrenceEndDate(null); else setNewTaskDateKind('exact'); }} style={[styles.choiceButton, newTaskRecurrence === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskRecurrence === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
                 ))}
               </View>
+              {newTaskRecurrence !== 'none' && <><Text style={styles.fieldLabel}>FINE RIPETIZIONE <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text><Pressable onPress={() => openCalendar('recurrenceEnd')} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Termina il</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskRecurrenceEndDate) ?? 'Nessuna data'}</Text></Pressable>{newTaskRecurrenceEndDate && <Pressable onPress={() => setNewTaskRecurrenceEndDate(null)} style={styles.clearRecurrenceEndButton}><Text style={styles.clearRecurrenceEndText}>Rimuovi data di fine</Text></Pressable>}</>}
               {editingTask?.recurrence_rule !== 'none' && <Text style={styles.dateHint}>La modifica vale solo per questa occorrenza.</Text>}
             </View>
             <Text style={styles.fieldLabel}>FASCIA ORARIA FORZATA <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text>
@@ -1144,12 +1198,12 @@ export default function HomeScreen() {
               {getCalendarDays(calendarCursor).map((date, index) => {
                 if (!date) return <View key={`empty-${index}`} style={styles.calendarDay} />;
                 const dateKey = toDateKey(date);
-                const isSelected = dateKey === newTaskDate;
+                const isSelected = dateKey === (calendarTarget === 'taskDate' ? newTaskDate : newTaskRecurrenceEndDate);
                 const isToday = dateKey === toDateKey(new Date());
                 return <Pressable key={dateKey} onPress={() => chooseDate(date)} style={[styles.calendarDay, isSelected && styles.calendarDaySelected, isToday && !isSelected && styles.calendarDayToday]}><Text style={[styles.calendarDayText, isSelected && styles.calendarDayTextSelected]}>{date.getDate()}</Text></Pressable>;
               })}
             </View>
-            <Pressable onPress={() => { setNewTaskDate(null); setNewTaskTime(''); setIsCalendarOpen(false); }} style={styles.backlogButton}><Text style={styles.backlogButtonText}>Lascia tra le note sparse</Text></Pressable>
+            {calendarTarget === 'taskDate' ? <Pressable onPress={() => { setNewTaskDate(null); setNewTaskTime(''); setIsCalendarOpen(false); }} style={styles.backlogButton}><Text style={styles.backlogButtonText}>Lascia senza data</Text></Pressable> : <Pressable onPress={() => { setNewTaskRecurrenceEndDate(null); setIsCalendarOpen(false); }} style={styles.backlogButton}><Text style={styles.backlogButtonText}>Nessuna data di fine</Text></Pressable>}
           </Pressable>
         </Pressable>
       </Modal>
@@ -1162,6 +1216,7 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#F7F5F1' }, safeArea: { flex: 1 }, content: { paddingHorizontal: 20, paddingBottom: 116 },
   header: { alignItems: 'flex-start', flexDirection: 'row', justifyContent: 'space-between', paddingTop: 12, paddingBottom: 25 },
   eyebrow: { color: '#517060', fontSize: 11, fontWeight: '800', letterSpacing: 1.8, marginBottom: 8 }, title: { color: '#252A26', fontSize: 31, fontWeight: '700', letterSpacing: -1 }, date: { color: '#74716C', fontSize: 15, marginTop: 6 },
+  currentTime: { color: '#305D4A', fontSize: 14, fontWeight: '800', marginTop: 7 },
   avatar: { alignItems: 'center', backgroundColor: '#DCEADD', borderRadius: 22, height: 44, justifyContent: 'center', width: 44 }, avatarText: { color: '#426251', fontSize: 20, fontWeight: '700' },
   focusCard: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 26, flexDirection: 'row', justifyContent: 'space-between', minHeight: 162, overflow: 'hidden', padding: 22 }, focusCopy: { flex: 1, paddingRight: 8 },
   focusLabel: { color: '#C6DBC9', fontSize: 10, fontWeight: '800', letterSpacing: 1.25, marginBottom: 10 }, focusTitle: { color: '#FFFFFF', fontSize: 24, fontWeight: '700', letterSpacing: -0.7, lineHeight: 29 }, focusDescription: { color: '#DCEADE', fontSize: 13, lineHeight: 18, marginTop: 10 },
@@ -1170,7 +1225,7 @@ const styles = StyleSheet.create({
   taskWrapper: { borderRadius: 18, marginBottom: 10, overflow: 'hidden', position: 'relative' }, deleteAction: { alignItems: 'center', backgroundColor: '#D94A43', bottom: 0, justifyContent: 'center', left: 0, position: 'absolute', top: 0, width: 104 }, deleteActionText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, editAction: { alignItems: 'center', backgroundColor: '#F2C94C', bottom: 0, justifyContent: 'center', position: 'absolute', right: 0, top: 0, width: 104 }, editActionText: { color: '#4D3D00', fontSize: 13, fontWeight: '800' }, taskCard: { alignItems: 'center', borderRadius: 18, borderWidth: 1, flexDirection: 'row', minHeight: 82, paddingHorizontal: 14, paddingVertical: 13 }, workTaskCard: { backgroundColor: '#F0F2FF', borderColor: '#BBC5F1' }, personalTaskCard: { backgroundColor: '#FFF2EA', borderColor: '#F1CBB6' },
   check: { alignItems: 'center', borderColor: '#CBC7C0', borderRadius: 11, borderWidth: 1.5, height: 22, justifyContent: 'center', marginRight: 12, width: 22 }, checkDone: { backgroundColor: '#3F725B', borderColor: '#3F725B' }, checkMark: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', marginTop: -1 },
   taskContent: { flex: 1 }, taskTitleRow: { alignItems: 'center', flexDirection: 'row', gap: 7 }, taskTitle: { color: '#323531', flexShrink: 1, fontSize: 16, fontWeight: '700', lineHeight: 21 }, taskTitleDone: { color: '#8B8882', textDecorationLine: 'line-through' }, taskTypeLabel: { backgroundColor: '#E7E3DC', borderRadius: 6, color: '#6D6860', fontSize: 9, fontWeight: '800', overflow: 'hidden', paddingHorizontal: 6, paddingVertical: 3 }, taskMeta: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', marginTop: 5 }, taskTime: { color: '#406755', fontSize: 12, fontWeight: '700' }, metaDot: { color: '#B7B2AA', fontSize: 12, marginHorizontal: 5 }, taskMetaText: { color: '#827E77', fontSize: 12 }, workTaskCategory: { color: '#3850A3', fontWeight: '800' }, personalTaskCategory: { color: '#A64E22', fontWeight: '800' }, taskNotesPreview: { color: '#656159', fontSize: 12, lineHeight: 17, marginTop: 6 }, checklistPreview: { gap: 5, marginTop: 8 }, checklistItem: { alignItems: 'center', flexDirection: 'row' }, checklistItemCheck: { alignItems: 'center', borderColor: '#A9A59D', borderRadius: 7, borderWidth: 1, height: 15, justifyContent: 'center', marginRight: 7, width: 15 }, checklistItemCheckDone: { backgroundColor: '#3F725B', borderColor: '#3F725B' }, checklistItemMark: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' }, checklistItemText: { color: '#605B54', flex: 1, fontSize: 12 }, checklistItemTextDone: { color: '#8A857E', textDecorationLine: 'line-through' },
-  priorityPill: { borderRadius: 9, marginLeft: 8, paddingHorizontal: 8, paddingVertical: 5 }, priorityText: { fontSize: 11, fontWeight: '800' }, emptyText: { color: '#827E77', fontSize: 15, paddingTop: 10, textAlign: 'center' },
+  priorityPill: { borderRadius: 9, marginLeft: 8, paddingHorizontal: 8, paddingVertical: 5 }, priorityText: { fontSize: 11, fontWeight: '800' }, emptyText: { color: '#827E77', fontSize: 15, paddingTop: 10, textAlign: 'center' }, clearRecurrenceEndButton: { alignSelf: 'flex-start', marginTop: 8, paddingHorizontal: 3, paddingVertical: 3 }, clearRecurrenceEndText: { color: '#A85735', fontSize: 12, fontWeight: '800' },
   addButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 18, bottom: 18, elevation: 2, flexDirection: 'row', justifyContent: 'center', left: 20, paddingVertical: 17, position: 'absolute', right: 20, shadowColor: '#17392A', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.18, shadowRadius: 12 }, addButtonPressed: { backgroundColor: '#274E3D' }, addIcon: { color: '#FFFFFF', fontSize: 23, fontWeight: '300', lineHeight: 23, marginRight: 8 }, addButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
   modalBackdrop: { backgroundColor: 'rgba(24, 28, 24, 0.38)', flex: 1, justifyContent: 'flex-end' }, modalDismissArea: { bottom: 0, left: 0, position: 'absolute', right: 0, top: 0 }, modalCard: { backgroundColor: '#F8F7F3', borderTopLeftRadius: 28, borderTopRightRadius: 28, height: '92%', maxHeight: '92%', minHeight: 0 }, modalScroller: { flex: 1 }, modalScrollContent: { flexGrow: 1, paddingBottom: 48, paddingHorizontal: 22, paddingTop: 10 }, modalHandle: { alignSelf: 'center', backgroundColor: '#D3D0C9', borderRadius: 2, height: 4, marginBottom: 23, width: 38 }, modalTitle: { color: '#292D29', fontSize: 25, fontWeight: '700', letterSpacing: -0.5 }, modalSubtitle: { color: '#77736D', fontSize: 14, lineHeight: 20, marginTop: 7 },
   input: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 14, borderWidth: 1, color: '#292D29', fontSize: 16, marginTop: 18, paddingHorizontal: 15, paddingVertical: 15 }, voiceWizardCard: { backgroundColor: '#305D4A', borderRadius: 14, marginTop: 16, padding: 13 }, voiceWizardLabel: { color: '#C6DBC9', fontSize: 9, fontWeight: '800', letterSpacing: 1 }, voiceWizardPrompt: { color: '#FFFFFF', fontSize: 15, fontWeight: '700', lineHeight: 21, marginTop: 4 }, voiceWizardState: { color: '#DCEADE', fontSize: 11, marginTop: 5 }, voiceTranscriptCard: { backgroundColor: '#F0F2FF', borderColor: '#BBC5F1', borderRadius: 12, borderWidth: 1, marginTop: 16, padding: 11 }, voiceTranscriptLabel: { color: '#3850A3', fontSize: 9, fontWeight: '800', letterSpacing: 1 }, voiceTranscriptText: { color: '#343B62', fontSize: 13, lineHeight: 19, marginTop: 4 }, voiceStepSection: { borderRadius: 14, marginHorizontal: -8, paddingHorizontal: 8 }, voiceStepSectionActive: { backgroundColor: '#E8F3EC', borderColor: '#9FBEA8', borderWidth: 1, marginTop: 10, paddingBottom: 12, paddingHorizontal: 12 }, voiceInputRow: { alignItems: 'center', flexDirection: 'row', gap: 9, marginTop: 8 }, voiceTextInput: { flex: 1, marginTop: 0 }, voiceButton: { alignItems: 'center', backgroundColor: '#E4F0E5', borderColor: '#7FA18A', borderRadius: 14, borderWidth: 1, height: 53, justifyContent: 'center', marginTop: 0, width: 53 }, voiceButtonActive: { backgroundColor: '#B54708', borderColor: '#B54708' }, voiceButtonIcon: { color: '#305D4A', fontSize: 22, lineHeight: 24 }, voiceHint: { color: '#8A857E', fontSize: 11, lineHeight: 16, marginTop: 7 }, voiceHintActive: { color: '#B54708', fontWeight: '700' }, voiceSummary: { backgroundColor: '#E8F3EC', borderRadius: 9, color: '#315D4A', fontSize: 11, fontWeight: '700', lineHeight: 16, marginTop: 8, paddingHorizontal: 10, paddingVertical: 8 }, notesInput: { minHeight: 100 }, checklistEditor: { marginTop: 10 }, checklistAddRow: { alignItems: 'center', flexDirection: 'row', gap: 8 }, checklistAddInput: { flex: 1, marginTop: 0 }, checklistAddButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 12, height: 50, justifyContent: 'center', width: 50 }, checklistAddButtonText: { color: '#FFFFFF', fontSize: 26, fontWeight: '400', lineHeight: 28 }, checklistDraftRow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 10, borderWidth: 1, flexDirection: 'row', marginTop: 7, paddingLeft: 12 }, checklistDraftText: { color: '#4C504B', flex: 1, fontSize: 13, fontWeight: '600' }, checklistRemoveButton: { alignItems: 'center', height: 38, justifyContent: 'center', width: 40 }, checklistRemoveText: { color: '#B54743', fontSize: 24, fontWeight: '400' }, fieldLabel: { color: '#6C716B', fontSize: 10, fontWeight: '800', letterSpacing: 1.05, marginBottom: 8, marginTop: 16 }, optionalLabel: { color: '#A19C94', fontSize: 9 }, dateHint: { color: '#8A857E', fontSize: 11, lineHeight: 16, marginBottom: 9, marginTop: -2 }, optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceButton: { backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 9 }, choiceButtonSelected: { backgroundColor: '#E4F0E5', borderColor: '#3F725B' }, choiceText: { color: '#716D66', fontSize: 13, fontWeight: '700' }, choiceTextSelected: { color: '#315D4A' }, customDurationRow: { flexDirection: 'row', gap: 8, marginTop: 10 }, durationField: { flex: 1 }, durationLabel: { color: '#78736C', fontSize: 9, fontWeight: '800', letterSpacing: 0.8, marginBottom: 5 }, durationInput: { backgroundColor: '#FFFFFF', borderColor: '#D7D3CC', borderRadius: 10, borderWidth: 1, color: '#292D29', fontSize: 16, paddingHorizontal: 11, paddingVertical: 10, textAlign: 'center' }, calendarButton: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E0DCD5', borderRadius: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 13, paddingVertical: 12 }, calendarButtonLabel: { color: '#5F6B63', fontSize: 13, fontWeight: '700' }, calendarButtonValue: { color: '#305D4A', fontSize: 13, fontWeight: '800' }, taskTimeRangeRow: { flexDirection: 'row', gap: 8 }, taskTimeRangeInput: { flex: 1, marginTop: 0, paddingHorizontal: 10, textAlign: 'center' }, voiceSavePrompt: { alignItems: 'center', backgroundColor: '#FFF0D9', borderColor: '#D88918', borderRadius: 12, borderWidth: 1, marginTop: 22, paddingHorizontal: 12, paddingVertical: 11 }, voiceSavePromptText: { color: '#914B00', fontSize: 14, fontWeight: '800', textAlign: 'center' }, saveButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 14, justifyContent: 'center', marginTop: 22, minHeight: 53 }, saveButtonWithVoicePrompt: { marginTop: 10 }, saveButtonDisabled: { backgroundColor: '#A8BBAE' }, saveButtonPressed: { opacity: 0.85 }, saveButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },

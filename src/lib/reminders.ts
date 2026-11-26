@@ -45,7 +45,7 @@ export async function schedulePlanReminders(blocks: ReminderBlock[]) {
     content: {
       title: block.reminder_minutes ? `Tra ${block.reminder_minutes} minuti: ${block.title}` : `Ora: ${block.title}`,
       body: 'Apri Cadenza per vedere il tuo piano.',
-      data: { taskId: block.task_id, url: '/explore' },
+      data: { taskId: block.task_id, url: '/index' },
       sound: true,
     },
     trigger: {

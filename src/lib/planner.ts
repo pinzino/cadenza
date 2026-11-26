@@ -7,6 +7,7 @@ export type PlannerTask = {
   priority: PlannerPriority;
   duration_minutes: number;
   scheduled_date: string | null;
+  scheduled_date_kind: 'exact' | 'deadline';
   scheduled_time: string | null;
   scheduled_window_start: string | null;
   scheduled_window_end: string | null;
@@ -33,6 +34,12 @@ export type PlannedBlock = {
   total_blocks: number;
   is_fixed: boolean;
   is_manual: boolean;
+};
+
+export type PlannerBusyInterval = {
+  block_date: string;
+  start_time: string;
+  end_time: string;
 };
 
 export type PlanResult = {
@@ -71,22 +78,35 @@ function addDays(date: Date, amount: number) {
   return result;
 }
 
+export function isBlockExpired(block: Pick<PlannedBlock, 'block_date' | 'end_time'>, now: Date) {
+  const today = dateKey(now);
+  return block.block_date < today || (block.block_date === today && timeToMinutes(block.end_time) <= now.getHours() * 60 + now.getMinutes());
+}
+
 export function buildAutomaticPlan(
   tasks: PlannerTask[],
   settings: PlannerSettings,
   startDate = new Date(),
   manualBlocks: PlannedBlock[] = [],
+  busyIntervals: PlannerBusyInterval[] = [],
 ): PlanResult {
   const activeTasks = tasks.filter((task) => !task.is_complete);
-  const blocks: PlannedBlock[] = manualBlocks.map((block) => ({ ...block, is_manual: true }));
+  const currentManualBlocks = manualBlocks.filter((block) => !isBlockExpired(block, startDate));
+  const blocks: PlannedBlock[] = currentManualBlocks.map((block) => ({ ...block, is_manual: true }));
   const fixedRemainders = new Map<string, number>();
   const manuallyAllocatedMinutes = new Map<string, number>();
 
-  manualBlocks.forEach((block) => {
+  currentManualBlocks.forEach((block) => {
     manuallyAllocatedMinutes.set(block.task_id, (manuallyAllocatedMinutes.get(block.task_id) ?? 0) + block.duration_minutes);
   });
 
-  for (const task of activeTasks.filter((item) => item.scheduled_date && item.scheduled_time && !manuallyAllocatedMinutes.has(item.id))) {
+  const isPastFixedTask = (task: PlannerTask) => {
+    if (!task.scheduled_date || !task.scheduled_time) return false;
+    const today = dateKey(startDate);
+    return task.scheduled_date < today || (task.scheduled_date === today && timeToMinutes(task.scheduled_time) < startDate.getHours() * 60 + startDate.getMinutes() + startDate.getSeconds() / 60);
+  };
+
+  for (const task of activeTasks.filter((item) => item.scheduled_date && item.scheduled_time && !manuallyAllocatedMinutes.has(item.id) && !isPastFixedTask(item))) {
     const start = timeToMinutes(task.scheduled_time!);
     const fixedDuration = Math.min(task.duration_minutes, Math.max(1, 1440 - start));
     blocks.push({
@@ -104,7 +124,7 @@ export function buildAutomaticPlan(
   }
 
   const flexibleTasks = activeTasks
-    .filter((task) => !task.scheduled_time || fixedRemainders.has(task.id))
+    .filter((task) => !task.scheduled_time || fixedRemainders.has(task.id) || manuallyAllocatedMinutes.has(task.id) || isPastFixedTask(task))
     .map((task) => {
       const originalDuration = fixedRemainders.has(task.id) ? fixedRemainders.get(task.id)! : task.duration_minutes;
       return {
@@ -118,6 +138,7 @@ export function buildAutomaticPlan(
       const deadlineFirst = first.scheduled_date ?? '9999-12-31';
       const deadlineSecond = second.scheduled_date ?? '9999-12-31';
       if (deadlineFirst !== deadlineSecond) return deadlineFirst.localeCompare(deadlineSecond);
+      if (first.scheduled_date_kind !== second.scheduled_date_kind) return first.scheduled_date_kind === 'exact' ? -1 : 1;
       const priorityDifference = priorityWeight[second.priority] - priorityWeight[first.priority];
       if (priorityDifference) return priorityDifference;
       return first.duration_minutes - second.duration_minutes;
@@ -125,6 +146,7 @@ export function buildAutomaticPlan(
 
   const unscheduledTaskIds: string[] = [];
   const firstPlanningDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const firstPlanningDateKey = dateKey(firstPlanningDate);
 
   for (const task of flexibleTasks) {
     let remaining = task.duration_minutes;
@@ -139,14 +161,21 @@ export function buildAutomaticPlan(
         .sort((first, second) => first.start - second.start);
       const currentDate = addDays(firstPlanningDate, dayOffset);
       const currentDateKey = dateKey(currentDate);
-      const occupied = blocks
+      const requestedDate = task.scheduled_date && task.scheduled_date >= firstPlanningDateKey && !isPastFixedTask(task) ? task.scheduled_date : null;
+      if (requestedDate && task.scheduled_date_kind === 'exact' && currentDateKey !== requestedDate) continue;
+      if (requestedDate && task.scheduled_date_kind === 'deadline' && currentDateKey > requestedDate) break;
+      const occupied = [...blocks, ...busyIntervals]
         .filter((block) => block.block_date === currentDateKey)
         .map((block) => ({ start: timeToMinutes(block.start_time), end: timeToMinutes(block.end_time) }))
         .sort((first, second) => first.start - second.start);
 
       for (const window of availableWindows) {
         if (remaining <= 0) break;
-        let cursor = window.start;
+        const earliestStart = dayOffset === 0
+          ? Math.ceil(startDate.getHours() * 60 + startDate.getMinutes() + startDate.getSeconds() / 60 + startDate.getMilliseconds() / 60000)
+          : 0;
+        let cursor = Math.max(window.start, earliestStart);
+        if (cursor >= window.end) continue;
         const boundaries = [
           ...occupied.filter((interval) => interval.end > window.start && interval.start < window.end),
           { start: window.end, end: window.end },

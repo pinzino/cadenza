@@ -1,0 +1,8 @@
+[functions.google-calendar-connect]
+verify_jwt = true
+
+[functions.google-calendar-sync]
+verify_jwt = true
+
+[functions.google-calendar-oauth-callback]
+verify_jwt = false
