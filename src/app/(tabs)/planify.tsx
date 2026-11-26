@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   FlatList,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +20,7 @@ import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
 import { AuthScreen } from '@/components/auth-screen';
+import { Alert } from '@/lib/app-alert';
 import { formatTimeInput, timeToMinutes } from '@/lib/planner';
 import { useCurrentTime } from '@/lib/use-current-time';
 import { supabase } from '@/lib/supabase';
@@ -378,6 +379,10 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
           <View style={[styles.priorityPill, { backgroundColor: priority.background }]}><Text style={[styles.priorityText, { color: priority.text }]}>{task.priority}</Text></View>
         </Pressable>
       </Animated.View>
+      {Platform.OS === 'web' && <View style={styles.webTaskActions}>
+        <Pressable accessibilityRole="button" onPress={editTask} style={styles.webEditAction}><Text style={styles.webEditActionText}>Modifica task</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={deleteTask} style={styles.webDeleteAction}><Text style={styles.webDeleteActionText}>Elimina task</Text></Pressable>
+      </View>}
     </View>
   );
 }
@@ -569,7 +574,7 @@ export default function HomeScreen() {
 
       const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert('Microfono non autorizzato', 'Per inserire un task a voce, consenti l’uso del microfono nelle impostazioni del telefono.');
+        Alert.alert('Microfono non autorizzato', Platform.OS === 'web' ? 'Consenti l’uso del microfono nelle impostazioni del browser.' : 'Per inserire un task a voce, consenti l’uso del microfono nelle impostazioni del telefono.');
         return;
       }
 
@@ -581,7 +586,7 @@ export default function HomeScreen() {
       });
     } catch {
       setIsListening(false);
-      Alert.alert('Dettatura non disponibile', 'Per usare il microfono serve la versione di sviluppo di Cadenza, non Expo Go.');
+      Alert.alert('Dettatura non disponibile', Platform.OS === 'web' ? 'Il browser non riesce ad avviare il riconoscimento vocale. Prova Chrome o Safari e consenti il microfono.' : 'Per usare il microfono serve la versione di sviluppo di Cadenza, non Expo Go.');
     }
   }
 
@@ -980,6 +985,13 @@ export default function HomeScreen() {
     }
   }
 
+  function confirmDeleteTask(task: Task) {
+    Alert.alert('Elimina task', `Vuoi eliminare “${task.title}” e tutti i suoi blocchi dall’Agenda?`, [
+      { text: 'Annulla', style: 'cancel' },
+      { text: 'Elimina task', style: 'destructive', onPress: () => void deleteTask(task) },
+    ]);
+  }
+
   async function signOut() {
     await supabase.auth.signOut();
   }
@@ -996,7 +1008,7 @@ export default function HomeScreen() {
         <FlatList
           data={datedUnplannedTasks}
           keyExtractor={(task) => task.id}
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[styles.content, Platform.OS === 'web' && styles.webContent]}
           showsVerticalScrollIndicator={false}
           refreshing={isLoadingTasks}
           onRefresh={() => void loadTasks()}
@@ -1034,12 +1046,12 @@ export default function HomeScreen() {
               {errorMessage && <Text style={styles.errorText}>{errorMessage}</Text>}
             </>
           }
-          renderItem={({ item: task }) => <SwipeableTask task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => void deleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />}
+          renderItem={({ item: task }) => <SwipeableTask task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => confirmDeleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />}
           ListEmptyComponent={!isLoadingTasks ? <Text style={styles.emptyText}>Nessun task con data da inserire nell’agenda.</Text> : undefined}
           ListFooterComponent={<View style={styles.backlogSection}>
             <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Senza data</Text><Text style={styles.sectionCount}>{undatedUnplannedTasks.length} task</Text></View>
             <Text style={styles.backlogDescription}>Cose da fare che devono ancora trovare posto nello spartito.</Text>
-            {undatedUnplannedTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => void deleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
+            {undatedUnplannedTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => confirmDeleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
             {!undatedUnplannedTasks.length && <Text style={styles.emptyText}>Nessun task senza data.</Text>}
           </View>}
         />
@@ -1050,9 +1062,9 @@ export default function HomeScreen() {
       </SafeAreaView>
 
       <Modal animationType="slide" transparent visible={isComposerOpen} onRequestClose={closeComposer}>
-        <View style={styles.modalBackdrop}>
+        <View style={[styles.modalBackdrop, Platform.OS === 'web' && styles.webModalBackdrop]}>
           <Pressable accessibilityLabel="Chiudi modulo task" onPress={closeComposer} style={styles.modalDismissArea} />
-          <View style={styles.modalCard}>
+          <View style={[styles.modalCard, Platform.OS === 'web' && styles.webModalCard]}>
             <ScrollView ref={composerScrollRef} style={styles.modalScroller} contentContainerStyle={styles.modalScrollContent} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled" nestedScrollEnabled showsVerticalScrollIndicator>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>{editingTask ? 'Modifica task' : 'Nuovo task'}</Text>
@@ -1212,6 +1224,14 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  webTaskActions: { flexDirection: 'row', gap: 16, justifyContent: 'flex-end', marginTop: 8, paddingHorizontal: 10 },
+  webEditAction: { padding: 7 },
+  webEditActionText: { color: '#305D4A', fontSize: 12, fontWeight: '800' },
+  webDeleteAction: { padding: 7 },
+  webDeleteActionText: { color: '#B33932', fontSize: 12, fontWeight: '800' },
+  webContent: { alignSelf: 'center', maxWidth: 920, paddingHorizontal: 0, width: '90%' },
+  webModalBackdrop: { justifyContent: 'center', padding: 20 },
+  webModalCard: { alignSelf: 'center', borderBottomLeftRadius: 28, borderBottomRightRadius: 28, maxWidth: 700, width: '90%' },
   loadingScreen: { alignItems: 'center', backgroundColor: '#F7F5F1', flex: 1, justifyContent: 'center' },
   screen: { flex: 1, backgroundColor: '#F7F5F1' }, safeArea: { flex: 1 }, content: { paddingHorizontal: 20, paddingBottom: 116 },
   header: { alignItems: 'flex-start', flexDirection: 'row', justifyContent: 'space-between', paddingTop: 12, paddingBottom: 25 },

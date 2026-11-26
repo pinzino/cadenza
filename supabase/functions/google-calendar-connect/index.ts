@@ -25,11 +25,26 @@ Deno.serve(async (request) => {
     const clientId = Deno.env.get('GOOGLE_OAUTH_CLIENT_ID');
     if (!clientId) return json({ error: 'Collegamento Google non ancora configurato.' }, 503);
 
+    const body = await request.json().catch(() => ({})) as { redirect_url?: unknown };
+    let redirectUrl: string | null = null;
+    if (body.redirect_url !== undefined) {
+      if (typeof body.redirect_url !== 'string') return json({ error: 'Indirizzo di ritorno non valido.' }, 400);
+      let target: URL;
+      try { target = new URL(body.redirect_url); }
+      catch { return json({ error: 'Indirizzo di ritorno non valido.' }, 400); }
+      const origin = request.headers.get('Origin');
+      const local = target.hostname === 'localhost' || target.hostname === '127.0.0.1';
+      if (!origin || target.origin !== origin || target.pathname !== '/settings' || target.search || target.hash || !(target.protocol === 'https:' || (local && target.protocol === 'http:'))) {
+        return json({ error: 'Indirizzo di ritorno non consentito.' }, 400);
+      }
+      redirectUrl = target.toString();
+    }
+
     const admin = getAdminClient();
     const state = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await admin.from('google_oauth_states').delete().eq('user_id', user.id);
-    const { error } = await admin.from('google_oauth_states').insert({ id: state, user_id: user.id, expires_at: expiresAt });
+    const { error } = await admin.from('google_oauth_states').insert({ id: state, user_id: user.id, expires_at: expiresAt, redirect_url: redirectUrl });
     if (error) throw error;
 
     const callback = `${getSupabaseUrl()}/functions/v1/google-calendar-oauth-callback`;

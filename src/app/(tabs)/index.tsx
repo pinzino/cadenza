@@ -1,10 +1,12 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 
+import { AuthScreen } from '@/components/auth-screen';
 import { buildAutomaticPlan, formatTimeInput, isBlockExpired, minutesToTime, PlannedBlock, PlannerBusyInterval, PlannerSettings, PlannerTask, timeToMinutes, TimeWindow } from '@/lib/planner';
 import { schedulePlanReminders } from '@/lib/reminders';
+import { Alert } from '@/lib/app-alert';
 import { supabase } from '@/lib/supabase';
 import { useCurrentTime } from '@/lib/use-current-time';
 
@@ -144,6 +146,7 @@ async function loadGoogleBusyIntervals(userId: string) {
 export default function PlanScreen() {
   const now = useCurrentTime();
   const [userId, setUserId] = useState<string | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [settings, setSettings] = useState<PlannerSettings>(defaultSettings);
   const [tasks, setTasks] = useState<PlannerDisplayTask[]>([]);
   const [blocks, setBlocks] = useState<DisplayBlock[]>([]);
@@ -208,8 +211,8 @@ export default function PlanScreen() {
 
   useEffect(() => {
     let isMounted = true;
-    supabase.auth.getSession().then(({ data }) => { if (isMounted) setUserId(data.session?.user.id ?? null); });
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => setUserId(session?.user.id ?? null));
+    supabase.auth.getSession().then(({ data }) => { if (isMounted) { setUserId(data.session?.user.id ?? null); setIsCheckingSession(false); } }).catch(() => { if (isMounted) setIsCheckingSession(false); });
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => { setUserId(session?.user.id ?? null); setIsCheckingSession(false); });
     return () => { isMounted = false; data.subscription.unsubscribe(); };
   }, []);
   useFocusEffect(useCallback(() => {
@@ -478,10 +481,11 @@ export default function PlanScreen() {
     await createPlan();
   }
 
-  if (!userId) return <SafeAreaView style={styles.safeArea}><View style={styles.center}><Text style={styles.emptyTitle}>Accedi dalla scheda Pianifica</Text><Text style={styles.emptyCopy}>Poi torna qui per creare la tua agenda.</Text></View></SafeAreaView>;
+  if (isCheckingSession) return <SafeAreaView style={styles.safeArea}><View style={styles.center}><ActivityIndicator color="#305D4A" size="large" /></View></SafeAreaView>;
+  if (!userId) return <AuthScreen />;
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={[styles.content, Platform.OS === 'web' && styles.webContent]} showsVerticalScrollIndicator={false}>
         <Text style={styles.eyebrow}>AGENDA</Text><Text style={styles.title}>Trova il ritmo giusto.</Text><Text style={styles.subtitle}>Gli spostamenti manuali futuri restano al loro posto; i task scaduti vengono ripianificati.</Text>
         <View style={styles.settingsSummary}><Text style={styles.summaryText}>Lavoro: {settings.workWindows.map((window) => `${window.start}–${window.end}`).join(', ')}</Text><Text style={styles.summaryText}>Personale: {settings.personalWindows.map((window) => `${window.start}–${window.end}`).join(', ')}</Text></View>
         <Pressable disabled={isPlanning || isLoading} onPress={() => void createPlan()} style={({ pressed }) => [styles.planButton, tasksNeedingPlacement.length > 0 ? styles.planButtonWarning : overdueTaskIds.size > 0 && styles.planButtonOverdue, (pressed || isPlanning || isLoading) && styles.planButtonPressed]}>{isPlanning ? <ActivityIndicator color="#FFFFFF" /> : <Text style={[styles.planButtonText, { textAlign: 'center', paddingHorizontal: 12 }]}>{blocks.length ? 'Ricalcola il piano' : 'Crea il piano'}{tasksNeedingPlacement.length > 0 ? ` · ${tasksNeedingPlacement.length} da posizionare` : ''}{overdueTaskIds.size > 0 ? ` · ${overdueTaskIds.size} ${overdueTaskIds.size === 1 ? 'scaduto' : 'scaduti'}` : ''}</Text>}</Pressable>
@@ -524,14 +528,14 @@ export default function PlanScreen() {
           {showingToday && nowLineIndex < 0 && activeEntryIndex < 0 && <NowLine label={currentTimeLabel} />}
           {!agendaBlocks.length && !agendaGoogleEvents.length && <View style={styles.emptyDay}><Text style={styles.emptyTitle}>Qui c’è spazio.</Text><Text style={styles.emptyCopy}>Scegli un altro giorno o ricalcola il piano.</Text></View>}
         </>) }
-        <Pressable disabled={isSchedulingReminders || !activeBlocks.length} onPress={() => void refreshReminders()} style={[styles.reminderButton, (!activeBlocks.length || isSchedulingReminders) && styles.reminderButtonDisabled]}>{isSchedulingReminders ? <ActivityIndicator color="#315D4A" /> : <Text style={styles.reminderButtonText}>🔔 Aggiorna promemoria</Text>}</Pressable>
+        {Platform.OS !== 'web' && <Pressable disabled={isSchedulingReminders || !activeBlocks.length} onPress={() => void refreshReminders()} style={[styles.reminderButton, (!activeBlocks.length || isSchedulingReminders) && styles.reminderButtonDisabled]}>{isSchedulingReminders ? <ActivityIndicator color="#315D4A" /> : <Text style={styles.reminderButtonText}>🔔 Aggiorna promemoria</Text>}</Pressable>}
         <View style={styles.statsCard}><Text style={styles.statsTitle}>Le tue statistiche</Text><View style={styles.statsRow}><View style={styles.statItem}><Text style={styles.workStatValue}>{formatMinutes(stats.workMinutes)}</Text><Text style={styles.statLabel}>Lavoro pianificato</Text></View><View style={styles.statItem}><Text style={styles.personalStatValue}>{formatMinutes(stats.personalMinutes)}</Text><Text style={styles.statLabel}>Personale pianificato</Text></View></View><Text style={styles.completedStat}>✓ {stats.completed} task completati · {stats.active} ancora attivi</Text></View>
         {unscheduledTasks.length > 0 && <View style={styles.unscheduledCard}><Text style={styles.unscheduledTitle}>Da sistemare</Text><Text style={styles.unscheduledCopy}>Non c’è abbastanza disponibilità libera nei prossimi 90 giorni.</Text>{unscheduledTasks.map((task) => <View key={task.id} style={styles.unscheduledTaskRow}><Text style={styles.unscheduledTask}>• {task.title}</Text><Text style={styles.unscheduledReason}>{task.planning_note ?? 'Disponibilità insufficiente nei prossimi 90 giorni.'}</Text></View>)}</View>}
       </ScrollView>
       <Modal animationType="fade" transparent visible={isCalendarOpen} onRequestClose={() => setIsCalendarOpen(false)}><Pressable style={styles.overlay} onPress={() => setIsCalendarOpen(false)}><Pressable style={styles.calendarCard} onPress={(event) => event.stopPropagation()}><View style={styles.calendarHeader}><Pressable onPress={() => moveCalendarMonth(-1)} style={styles.calendarArrow}><Text style={styles.calendarArrowText}>‹</Text></Pressable><Text style={styles.calendarTitle}>{formatCalendarMonth(calendarCursor)}</Text><Pressable onPress={() => moveCalendarMonth(1)} style={styles.calendarArrow}><Text style={styles.calendarArrowText}>›</Text></Pressable></View><View style={styles.weekdayRow}>{['L', 'M', 'M', 'G', 'V', 'S', 'D'].map((day, index) => <Text key={`${day}-${index}`} style={styles.weekday}>{day}</Text>)}</View><View style={styles.calendarGrid}>{getCalendarDays(calendarCursor).map((date, index) => { if (!date) return <View key={`empty-${index}`} style={styles.calendarDay} />; const key = toDateKey(date); const selected = key === selectedDate; return <Pressable key={key} onPress={() => chooseAgendaDate(date)} style={[styles.calendarDay, selected && styles.calendarDaySelected]}><Text style={[styles.calendarDayText, selected && styles.calendarDayTextSelected]}>{date.getDate()}</Text></Pressable>; })}</View></Pressable></Pressable></Modal>
       <Modal animationType="slide" transparent visible={!!movingBlock} onRequestClose={() => setMovingBlock(null)}>
-        <Pressable style={styles.moveOverlay} onPress={() => setMovingBlock(null)}>
-          <Pressable style={styles.moveCard} onPress={(event) => event.stopPropagation()}>
+        <Pressable style={[styles.moveOverlay, Platform.OS === 'web' && styles.webMoveOverlay]} onPress={() => setMovingBlock(null)}>
+          <Pressable style={[styles.moveCard, Platform.OS === 'web' && styles.webMoveCard]} onPress={(event) => event.stopPropagation()}>
             <View style={styles.modalHandle} />
             <View style={styles.moveHeader}><Text style={styles.moveTitle}>Sposta blocco</Text></View>
             <View style={styles.moveActionRow}>
@@ -554,6 +558,9 @@ export default function PlanScreen() {
 }
 
 const styles = StyleSheet.create({
+  webContent: { alignSelf: 'center', maxWidth: 920, paddingHorizontal: 0, width: '90%' },
+  webMoveOverlay: { justifyContent: 'center', padding: 20 },
+  webMoveCard: { alignSelf: 'center', borderRadius: 24, maxWidth: 580, width: '90%' },
   moveHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
   moveActionRow: { flexDirection: 'row', gap: 20, marginTop: 12 },
   editTaskText: { color: '#305D4A', fontSize: 13, fontWeight: '800' },

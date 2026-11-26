@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { supabase } from '@/lib/supabase';
+import { Alert } from '@/lib/app-alert';
 
 export function AuthScreen() {
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
@@ -29,7 +29,7 @@ export function AuthScreen() {
     setIsLoading(true);
     const credentials = { email: email.trim().toLowerCase(), password };
     const result = isCreatingAccount
-      ? await supabase.auth.signUp(credentials)
+      ? await supabase.auth.signUp({ ...credentials, ...(Platform.OS === 'web' && typeof window !== 'undefined' ? { options: { emailRedirectTo: window.location.origin } } : {}) })
       : await supabase.auth.signInWithPassword(credentials);
     setIsLoading(false);
 
@@ -95,7 +95,7 @@ export function AuthScreen() {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F7F5F1' },
-  container: { flex: 1, justifyContent: 'center', paddingHorizontal: 28 },
+  container: { flex: 1, justifyContent: 'center', paddingHorizontal: 28, ...(Platform.OS === 'web' ? { alignSelf: 'center' as const, maxWidth: 404, paddingHorizontal: 0, width: '90%' as const } : {}) },
   brandMark: { alignItems: 'center', alignSelf: 'flex-start', backgroundColor: '#DCEADD', borderRadius: 24, height: 48, justifyContent: 'center', marginBottom: 23, width: 48 },
   brandMarkText: { color: '#426251', fontSize: 22, fontWeight: '700' },
   brand: { color: '#517060', fontSize: 11, fontWeight: '800', letterSpacing: 1.8, marginBottom: 10 },

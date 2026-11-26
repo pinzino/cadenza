@@ -1,56 +1,32 @@
-# Welcome to your Expo app 👋
+# Cadenza
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Agenda personale e lavorativa con pianificazione automatica. La stessa base dati Supabase sincronizza app Android e webapp.
 
-## Get started
+## Avvio sul computer
 
-1. Install dependencies
+1. Installa Node.js LTS e le dipendenze con `npm install`.
+2. Crea `.env` nella radice del progetto con `EXPO_PUBLIC_SUPABASE_URL` e `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` del tuo progetto Supabase. Usa solo la chiave pubblicabile, mai la chiave segreta.
+3. Avvia la webapp con `npx expo start --web` e apri l'indirizzo mostrato nel terminale.
+4. Accedi con lo stesso account usato sul telefono: task e blocchi dell'Agenda arrivano da Supabase.
 
-   ```bash
-   npm install
-   ```
+Per provare il pacchetto destinato alla pubblicazione, esegui `npx expo export --platform web` e poi `npx expo serve`. L'export statico si trova in `dist/`.
 
-2. Start the app
+## Configurazione Supabase per il web
 
-   ```bash
-   npx expo start
-   ```
+- In **Authentication → URL Configuration**, aggiungi l'indirizzo locale mostrato da Expo (per esempio `http://localhost:8081`) agli URL di reindirizzamento. Quando pubblichi la webapp, aggiungi anche il suo indirizzo HTTPS. Serve per le email di conferma dei nuovi account.
+- Per collegare Google Calendar direttamente dal browser, applica la migrazione `supabase/migrations/017_google_oauth_web_redirect.sql` e distribuisci di nuovo le Edge Functions `google-calendar-connect` e `google-calendar-oauth-callback`. I segreti Google già configurati restano gli stessi.
+- Il riconoscimento vocale sul web dipende dal browser e dal permesso per il microfono. In produzione usa HTTPS.
 
-In the output, you'll find options to open the app in a
+I promemoria locali sono disponibili nell'app Android; la webapp mostra task e Agenda senza promettere notifiche del browser.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **src/app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Verifiche
 
 ```bash
-npm run reset-project
+npx tsc --noEmit
+npx expo lint
+npx expo export --platform web
 ```
 
-This command will move the starter code to the **example** directory and create a blank **src/app** directory where you can start developing.
+## Build Android di prova
 
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Il profilo `preview` in `eas.json` produce un APK installabile. Le modifiche al codice web condiviso non aggiornano automaticamente un APK già installato.

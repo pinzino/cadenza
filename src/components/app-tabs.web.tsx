@@ -7,7 +7,7 @@ import {
   TabListProps,
 } from 'expo-router/ui';
 import type { ComponentProps } from 'react';
-import { Pressable, View, StyleSheet } from 'react-native';
+import { Pressable, View, StyleSheet, useWindowDimensions } from 'react-native';
 
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 
@@ -17,7 +17,7 @@ import { ThemedView } from './themed-view';
 export default function AppTabs() {
   return (
     <Tabs>
-      <TabSlot style={{ height: '100%' }} />
+      <TabSlot style={{ height: '100%', paddingTop: 78 }} />
       <TabList asChild>
         <CustomTabList>
           <TabTrigger name="planify" href="/planify" asChild>
@@ -51,10 +51,11 @@ export function TabButton({ children, isFocused, ...props }: TabTriggerSlotProps
 }
 
 export function CustomTabList(props: TabListProps) {
+  const compact = useWindowDimensions().width < 600;
   return (
-    <View {...props} style={styles.tabListContainer}>
-      <ThemedView type="backgroundElement" style={styles.innerContainer}>
-        <ThemedText type="smallBold" style={styles.brandText}>
+    <View {...props} style={[styles.tabListContainer, compact && styles.compactTabList]}>
+      <ThemedView type="backgroundElement" style={[styles.innerContainer, compact && styles.compactInnerContainer]}>
+        <ThemedText type="smallBold" style={[styles.brandText, compact && styles.compactBrand]}>
           Cadenza
         </ThemedText>
 
@@ -65,18 +66,28 @@ export function CustomTabList(props: TabListProps) {
 }
 
 const styles = StyleSheet.create({
+  compactTabList: { paddingHorizontal: 4 },
+  compactInnerContainer: { gap: 0, justifyContent: 'space-around', paddingHorizontal: 4 },
+  compactBrand: { display: 'none' },
   tabListContainer: {
     position: 'absolute',
+    top: 0,
+    zIndex: 20,
     width: '100%',
-    padding: Spacing.three,
+    minHeight: 66,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
     justifyContent: 'center',
     alignItems: 'center',
     flexDirection: 'row',
+    backgroundColor: '#F7F5F1',
+    borderBottomColor: '#E8E4DC',
+    borderBottomWidth: 1,
   },
   innerContainer: {
-    paddingVertical: Spacing.two,
+    paddingVertical: Spacing.one,
     paddingHorizontal: Spacing.five,
-    borderRadius: Spacing.five,
+    borderRadius: Spacing.three,
     flexDirection: 'row',
     alignItems: 'center',
     flexGrow: 1,
@@ -85,6 +96,8 @@ const styles = StyleSheet.create({
   },
   brandText: {
     marginRight: 'auto',
+    color: '#305D4A',
+    fontWeight: '800',
   },
   pressed: {
     opacity: 0.7,

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as WebBrowser from 'expo-web-browser';
 
+import { AuthScreen } from '@/components/auth-screen';
 import { formatTimeInput, TimeWindow, timeToMinutes } from '@/lib/planner';
+import { Alert } from '@/lib/app-alert';
 import { supabase } from '@/lib/supabase';
 
 type GoogleConnection = { id: string; google_email: string | null };
@@ -47,6 +49,7 @@ async function edgeFunctionErrorMessage(error: unknown) {
 
 export default function SettingsScreen() {
   const [userId, setUserId] = useState<string | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [workWindows, setWorkWindows] = useState<TimeWindow[]>([{ start: '09:00', end: '18:00' }]);
   const [personalWindows, setPersonalWindows] = useState<TimeWindow[]>([{ start: '18:00', end: '21:00' }]);
   const [maxBlockMinutes, setMaxBlockMinutes] = useState(60);
@@ -99,9 +102,9 @@ export default function SettingsScreen() {
   useEffect(() => {
     let isMounted = true;
     supabase.auth.getSession().then(({ data }) => {
-      if (isMounted) setUserId(data.session?.user.id ?? null);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => setUserId(session?.user.id ?? null));
+      if (isMounted) { setUserId(data.session?.user.id ?? null); setIsCheckingSession(false); }
+    }).catch(() => { if (isMounted) setIsCheckingSession(false); });
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => { setUserId(session?.user.id ?? null); setIsCheckingSession(false); });
     return () => {
       isMounted = false;
       data.subscription.unsubscribe();
@@ -114,6 +117,29 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     if (userId) void Promise.resolve().then(() => loadGoogleCalendars(userId));
+  }, [loadGoogleCalendars, userId]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !userId || typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    const status = url.searchParams.get('google_calendar');
+    if (!status) return;
+    url.searchParams.delete('google_calendar');
+    window.history.replaceState(null, '', url.toString());
+    if (status !== 'connected') {
+      Alert.alert('Collegamento non riuscito', 'Riprova a collegare Google Calendar.');
+      return;
+    }
+    void Promise.resolve().then(() => {
+      setIsGoogleSyncing(true);
+      return supabase.functions.invoke('google-calendar-sync');
+    }).then(async ({ error }) => {
+      await loadGoogleCalendars(userId);
+      if (error) setGoogleSyncMessage('Google Calendar collegato. Premi Aggiorna calendari per importare gli appuntamenti.');
+      else setGoogleSyncMessage('Google Calendar collegato e aggiornato. Scegli i calendari da mostrare nell’Agenda.');
+    }).catch(() => {
+      setGoogleSyncMessage('Google Calendar collegato. Premi Aggiorna calendari per importare gli appuntamenti.');
+    }).finally(() => setIsGoogleSyncing(false));
   }, [loadGoogleCalendars, userId]);
 
   async function syncGoogleCalendars(showResult = true) {
@@ -144,10 +170,15 @@ export default function SettingsScreen() {
 
   async function connectGoogleCalendar() {
     setIsGoogleConnecting(true);
-    const { data, error } = await supabase.functions.invoke('google-calendar-connect');
+    const webRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? `${window.location.origin}/settings` : null;
+    const { data, error } = await supabase.functions.invoke('google-calendar-connect', { body: webRedirectUrl ? { redirect_url: webRedirectUrl } : {} });
     if (error || !data?.url) {
       setIsGoogleConnecting(false);
       Alert.alert('Collegamento non disponibile', error ? await edgeFunctionErrorMessage(error) : 'Riprova tra poco.');
+      return;
+    }
+    if (webRedirectUrl) {
+      window.location.assign(data.url as string);
       return;
     }
     const result = await WebBrowser.openAuthSessionAsync(data.url as string, 'cadenza:///settings');
@@ -217,11 +248,12 @@ export default function SettingsScreen() {
     }
   }
 
-  if (!userId) return <SafeAreaView style={styles.safeArea}><View style={styles.center}><Text style={styles.emptyTitle}>Accedi dalla scheda Pianifica</Text></View></SafeAreaView>;
+  if (isCheckingSession) return <SafeAreaView style={styles.safeArea}><View style={styles.center}><ActivityIndicator color="#305D4A" size="large" /></View></SafeAreaView>;
+  if (!userId) return <AuthScreen />;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={[styles.content, Platform.OS === 'web' && styles.webContent]} showsVerticalScrollIndicator={false}>
         <Text style={styles.eyebrow}>IMPOSTAZIONI</Text>
         <Text style={styles.title}>Costruisci il tuo ritmo.</Text>
         <Text style={styles.subtitle}>Definisci quando Cadenza può sistemare i tuoi task.</Text>
@@ -276,5 +308,6 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  webContent: { alignSelf: 'center', maxWidth: 720, paddingHorizontal: 0, width: '90%' },
   safeArea: { backgroundColor: '#F7F5F1', flex: 1 }, content: { paddingBottom: 120, paddingHorizontal: 20, paddingTop: 16 }, center: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: 30 }, eyebrow: { color: '#517060', fontSize: 11, fontWeight: '800', letterSpacing: 1.8, marginBottom: 8 }, title: { color: '#252A26', fontSize: 30, fontWeight: '700', letterSpacing: -0.9 }, subtitle: { color: '#74716C', fontSize: 15, lineHeight: 21, marginTop: 8 }, loader: { marginTop: 45 }, settingsCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E4DC', borderRadius: 22, borderWidth: 1, marginTop: 25, padding: 18 }, availabilityHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 2 }, availabilityTitle: { color: '#414641', fontSize: 16, fontWeight: '800' }, categoryDot: { borderRadius: 5, height: 10, marginRight: 8, width: 10 }, workDot: { backgroundColor: '#5577B8' }, personalDot: { backgroundColor: '#D28757' }, timeRow: { alignItems: 'flex-end', flexDirection: 'row', marginBottom: 8 }, timeField: { flex: 1 }, timeSeparator: { color: '#9C978F', fontSize: 20, paddingBottom: 12, paddingHorizontal: 9 }, label: { color: '#77736C', fontSize: 9, fontWeight: '800', letterSpacing: 0.9, marginBottom: 7, marginTop: 12 }, timeInput: { backgroundColor: '#F8F7F3', borderColor: '#DEDAD2', borderRadius: 12, borderWidth: 1, color: '#2B302C', fontSize: 20, fontWeight: '700', padding: 12, textAlign: 'center' }, removeWindow: { alignItems: 'center', backgroundColor: '#FBE7E4', borderRadius: 10, height: 45, justifyContent: 'center', marginLeft: 8, width: 34 }, removeWindowText: { color: '#B1433C', fontSize: 22, fontWeight: '700' }, addWindow: { alignSelf: 'flex-start', marginTop: 3, paddingVertical: 7 }, addWindowText: { color: '#3F725B', fontSize: 12, fontWeight: '800' }, divider: { backgroundColor: '#EBE7E0', height: 1, marginVertical: 19 }, options: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 }, option: { backgroundColor: '#F8F7F3', borderColor: '#E0DCD5', borderRadius: 10, borderWidth: 1, paddingHorizontal: 11, paddingVertical: 8 }, optionSelected: { backgroundColor: '#E4F0E5', borderColor: '#3F725B' }, optionText: { color: '#716D66', fontSize: 12, fontWeight: '700' }, optionTextSelected: { color: '#315D4A' }, saveButton: { alignItems: 'center', backgroundColor: '#305D4A', borderRadius: 14, justifyContent: 'center', marginTop: 25, minHeight: 53 }, saveButtonPressed: { opacity: 0.72 }, saveButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' }, googleCard: { backgroundColor: '#F0F4FF', borderColor: '#BBC5F1', borderRadius: 22, borderWidth: 1, marginTop: 16, padding: 18 }, googleTitle: { color: '#34436E', fontSize: 17, fontWeight: '800' }, googleCopy: { color: '#586078', fontSize: 13, lineHeight: 19, marginTop: 6 }, googleConnectButton: { alignItems: 'center', backgroundColor: '#4864B1', borderRadius: 13, marginTop: 16, minHeight: 48, justifyContent: 'center' }, googleConnectButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, googleRefreshButton: { alignItems: 'center', borderColor: '#7890CF', borderRadius: 12, borderWidth: 1, justifyContent: 'center', marginTop: 15, minHeight: 44 }, googleRefreshButtonText: { color: '#3D579D', fontSize: 13, fontWeight: '800' }, googleButtonDisabled: { opacity: 0.55 }, googleEmpty: { color: '#6C7285', fontSize: 12, lineHeight: 17, marginTop: 14 }, googleCalendarRow: { alignItems: 'center', backgroundColor: '#FFFFFFAA', borderColor: '#D0D8F0', borderRadius: 13, borderWidth: 1, flexDirection: 'row', marginTop: 10, minHeight: 58, paddingHorizontal: 12 }, googleCalendarRowEnabled: { backgroundColor: '#E4F0E5', borderColor: '#85AD90' }, googleCalendarDot: { borderRadius: 6, height: 12, marginRight: 10, width: 12 }, googleCalendarText: { flex: 1 }, googleCalendarTitle: { color: '#3A4152', fontSize: 13, fontWeight: '800' }, googleCalendarHint: { color: '#73798A', fontSize: 11, marginTop: 3 }, googleToggle: { backgroundColor: '#C8CBD3', borderRadius: 12, height: 24, padding: 3, width: 42 }, googleToggleEnabled: { backgroundColor: '#3F725B' }, googleToggleKnob: { backgroundColor: '#FFFFFF', borderRadius: 9, height: 18, width: 18 }, googleToggleKnobEnabled: { alignSelf: 'flex-end' }, errorText: { backgroundColor: '#FFF1E8', borderRadius: 12, color: '#9F3800', fontSize: 13, lineHeight: 19, marginTop: 15, padding: 12 }, emptyTitle: { color: '#363A36', fontSize: 17, fontWeight: '800', textAlign: 'center' },
 });

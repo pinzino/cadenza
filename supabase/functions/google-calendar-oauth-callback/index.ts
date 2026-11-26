@@ -10,7 +10,12 @@ function errorMessage(error: unknown) {
   }
 }
 
-function appRedirect(status: 'connected' | 'error', detail?: string) {
+function appRedirect(status: 'connected' | 'error', detail?: string, redirectUrl?: string | null) {
+  if (redirectUrl) {
+    const target = new URL(redirectUrl);
+    target.searchParams.set('google_calendar', status);
+    return Response.redirect(target.toString(), 302);
+  }
   if (status === 'error') {
     const message = detail ? `Collegamento Google non riuscito. Dettaglio: ${detail}` : 'Collegamento Google non riuscito. Torna a Cadenza e riprova.';
     return new Response(message, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -22,18 +27,21 @@ Deno.serve(async (request) => {
   const url = new URL(request.url);
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
-  if (!code || !state || url.searchParams.has('error')) return appRedirect('error');
+  if (!state) return appRedirect('error');
 
+  let redirectUrl: string | null = null;
   try {
     const admin = getAdminClient();
-    const { data: oauthState, error: stateError } = await admin.from('google_oauth_states').select('id, user_id, expires_at').eq('id', state).maybeSingle();
+    const { data: oauthState, error: stateError } = await admin.from('google_oauth_states').select('id, user_id, expires_at, redirect_url').eq('id', state).maybeSingle();
     if (stateError) return appRedirect('error', stateError.message);
     if (!oauthState) return appRedirect('error', 'Richiesta OAuth non trovata o già utilizzata.');
-    if (new Date(oauthState.expires_at) < new Date()) return appRedirect('error', 'La richiesta OAuth è scaduta.');
+    redirectUrl = oauthState.redirect_url;
+    if (!code || url.searchParams.has('error')) return appRedirect('error', 'Autorizzazione Google annullata.', redirectUrl);
+    if (new Date(oauthState.expires_at) < new Date()) return appRedirect('error', 'La richiesta OAuth è scaduta.', redirectUrl);
 
     const clientId = Deno.env.get('GOOGLE_OAUTH_CLIENT_ID');
     const clientSecret = Deno.env.get('GOOGLE_OAUTH_CLIENT_SECRET');
-    if (!clientId || !clientSecret) return appRedirect('error', 'Credenziali Google mancanti su Supabase.');
+    if (!clientId || !clientSecret) return appRedirect('error', 'Credenziali Google mancanti su Supabase.', redirectUrl);
 
     const callback = `${getSupabaseUrl()}/functions/v1/google-calendar-oauth-callback`;
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
@@ -58,9 +66,9 @@ Deno.serve(async (request) => {
     const { error: tokenError } = await admin.from('google_calendar_tokens').upsert({ connection_id: connection.id, refresh_token: tokens.refresh_token, scope: tokens.scope ?? null, updated_at: new Date().toISOString() }, { onConflict: 'connection_id' });
     if (tokenError) throw tokenError;
     await admin.from('google_oauth_states').delete().eq('id', state);
-    return appRedirect('connected');
+    return appRedirect('connected', undefined, redirectUrl);
   } catch (error) {
     console.error(error);
-    return appRedirect('error', errorMessage(error));
+    return appRedirect('error', errorMessage(error), redirectUrl);
   }
 });
