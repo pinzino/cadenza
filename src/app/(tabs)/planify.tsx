@@ -47,6 +47,7 @@ type Task = {
   scheduled_window_start: string | null;
   scheduled_window_end: string | null;
   is_complete: boolean;
+  exclude_from_plan: boolean;
   is_splittable: boolean;
   reminder_enabled: boolean;
   reminder_minutes: number;
@@ -353,15 +354,15 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
   }
 
   return (
-    <View style={styles.taskWrapper}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Elimina ${task.title}`} onPress={deleteTask} style={styles.deleteAction}>
+    <View style={[styles.taskWrapper, Platform.OS === 'web' && styles.webTaskWrapper]}>
+      {Platform.OS !== 'web' && <Pressable accessibilityRole="button" accessibilityLabel={`Elimina ${task.title}`} onPress={deleteTask} style={styles.deleteAction}>
         <Text style={styles.deleteActionText}>Elimina</Text>
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Modifica ${task.title}`} onPress={editTask} style={styles.editAction}>
+      </Pressable>}
+      {Platform.OS !== 'web' && <Pressable accessibilityRole="button" accessibilityLabel={`Modifica ${task.title}`} onPress={editTask} style={styles.editAction}>
         <Text style={styles.editActionText}>Modifica</Text>
-      </Pressable>
-      <Animated.View {...panResponder.panHandlers} style={{ transform: [{ translateX }] }}>
-        <Pressable accessibilityRole="button" accessibilityLabel={task.task_type === 'note' ? `Modifica nota ${task.title}` : `Segna ${task.title} come ${task.is_complete ? 'da fare' : 'completato'}`} onPress={task.task_type === 'note' ? onEdit : onToggle} style={[styles.taskCard, task.category === 'Lavoro' ? styles.workTaskCard : styles.personalTaskCard]}>
+      </Pressable>}
+      <Animated.View {...(Platform.OS === 'web' ? {} : panResponder.panHandlers)} style={Platform.OS === 'web' ? undefined : { transform: [{ translateX }] }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={task.task_type === 'note' ? `Modifica nota ${task.title}` : `Segna ${task.title} come ${task.is_complete ? 'da fare' : 'completato'}`} onPress={task.task_type === 'note' ? onEdit : onToggle} style={[styles.taskCard, task.category === 'Lavoro' ? styles.workTaskCard : styles.personalTaskCard, Platform.OS === 'web' && styles.webTaskCard]}>
           {task.task_type !== 'note' && <View style={[styles.check, task.is_complete && styles.checkDone]}>{task.is_complete && <Text style={styles.checkMark}>✓</Text>}</View>}
           <View style={styles.taskContent}>
             <View style={styles.taskTitleRow}><Text style={[styles.taskTitle, task.is_complete && styles.taskTitleDone]}>{task.title}</Text>{task.task_type !== 'task' && <Text style={styles.taskTypeLabel}>{task.task_type === 'note' ? 'Nota' : 'Checklist'}</Text>}</View>
@@ -371,6 +372,7 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
               <Text style={styles.metaDot}>•</Text>
               <Text style={[styles.taskMetaText, task.category === 'Lavoro' ? styles.workTaskCategory : styles.personalTaskCategory]}>{task.category}</Text>
               {scheduledDate && <><Text style={styles.metaDot}>•</Text><Text style={styles.taskMetaText}>{task.scheduled_date_kind === 'deadline' ? `Entro ${scheduledDate.toLowerCase()}` : scheduledDate}</Text></>}
+              {task.exclude_from_plan && <><Text style={styles.metaDot}>•</Text><Text style={styles.outOfPlanMeta}>Fuori Agenda</Text></>}
               {task.recurrence_rule !== 'none' && <><Text style={styles.metaDot}>•</Text><Text style={styles.taskMetaText}>{recurrenceLabel(task.recurrence_rule)}</Text></>}
             </View>
             {task.task_type === 'note' && task.notes && <Text numberOfLines={2} style={styles.taskNotesPreview}>{task.notes}</Text>}
@@ -378,11 +380,11 @@ function SwipeableTask({ task, onToggle, onEdit, onDelete, onToggleChecklistItem
           </View>
           <View style={[styles.priorityPill, { backgroundColor: priority.background }]}><Text style={[styles.priorityText, { color: priority.text }]}>{task.priority}</Text></View>
         </Pressable>
+        {Platform.OS === 'web' && <View style={styles.webTaskActions}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Modifica ${task.title}`} onPress={editTask} style={({ pressed }) => [styles.webActionButton, styles.webEditAction, pressed && styles.webActionPressed]}><Text style={styles.webEditActionText}>Modifica</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Elimina ${task.title}`} onPress={deleteTask} style={({ pressed }) => [styles.webActionButton, styles.webDeleteAction, pressed && styles.webActionPressed]}><Text style={styles.webDeleteActionText}>Elimina</Text></Pressable>
+        </View>}
       </Animated.View>
-      {Platform.OS === 'web' && <View style={styles.webTaskActions}>
-        <Pressable accessibilityRole="button" onPress={editTask} style={styles.webEditAction}><Text style={styles.webEditActionText}>Modifica task</Text></Pressable>
-        <Pressable accessibilityRole="button" onPress={deleteTask} style={styles.webDeleteAction}><Text style={styles.webDeleteActionText}>Elimina task</Text></Pressable>
-      </View>}
     </View>
   );
 }
@@ -414,6 +416,7 @@ export default function HomeScreen() {
   const [customMinutes, setCustomMinutes] = useState('0');
   const [newTaskDate, setNewTaskDate] = useState<string | null>(toDateKey(new Date()));
   const [newTaskDateKind, setNewTaskDateKind] = useState<DateKind>('deadline');
+  const [newTaskExcluded, setNewTaskExcluded] = useState(false);
   const [newTaskTime, setNewTaskTime] = useState('');
   const [newTaskWindowStart, setNewTaskWindowStart] = useState('');
   const [newTaskWindowEnd, setNewTaskWindowEnd] = useState('');
@@ -515,6 +518,7 @@ export default function HomeScreen() {
       recognizedLabel = `Durata: ${formatDuration(details.durationMinutes)}`;
     } else if (currentStep === 'dueDate' && details.date !== undefined) {
       setNewTaskDate(details.date);
+      if (details.date) { if (newTaskExcluded) setNewTaskReminderEnabled(defaultReminderEnabled); setNewTaskExcluded(false); }
       if (!details.date) setNewTaskTime('');
       accepted = true;
       nextStep = details.date ? 'timeChoice' : 'save';
@@ -680,7 +684,7 @@ export default function HomeScreen() {
     setIsLoadingTasks(true);
     setErrorMessage(null);
     const [tasksResult, settingsResult, checklistResult, blocksResult] = await Promise.all([
-      supabase.from('tasks').select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes').order('scheduled_date', { ascending: true, nullsFirst: false }).order('scheduled_time', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true }),
+      supabase.from('tasks').select('id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, exclude_from_plan, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes').order('scheduled_date', { ascending: true, nullsFirst: false }).order('scheduled_time', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true }),
       supabase.from('planner_settings').select('reminder_default_enabled, reminder_default_minutes').eq('user_id', session.user.id).maybeSingle(),
       supabase.from('task_checklist_items').select('id, task_id, title, is_complete, position').order('position'),
       supabase.from('task_blocks').select('task_id'),
@@ -707,9 +711,11 @@ export default function HomeScreen() {
   }, [loadTasks, session]));
 
   const unplannedTasks = useMemo(() => tasks.filter((task) => !agendaTaskIds.has(task.id)), [agendaTaskIds, tasks]);
-  const unplannedMinutes = useMemo(() => unplannedTasks.filter((task) => !task.is_complete).reduce((total, task) => total + task.duration_minutes, 0), [unplannedTasks]);
-  const datedUnplannedTasks = useMemo(() => unplannedTasks.filter((task) => task.scheduled_date), [unplannedTasks]);
-  const undatedUnplannedTasks = useMemo(() => unplannedTasks.filter((task) => !task.scheduled_date), [unplannedTasks]);
+  const tasksToPlan = useMemo(() => unplannedTasks.filter((task) => !task.exclude_from_plan), [unplannedTasks]);
+  const excludedTasks = useMemo(() => unplannedTasks.filter((task) => task.exclude_from_plan), [unplannedTasks]);
+  const unplannedMinutes = useMemo(() => tasksToPlan.filter((task) => !task.is_complete).reduce((total, task) => total + task.duration_minutes, 0), [tasksToPlan]);
+  const datedUnplannedTasks = useMemo(() => tasksToPlan.filter((task) => task.scheduled_date), [tasksToPlan]);
+  const undatedUnplannedTasks = useMemo(() => tasksToPlan.filter((task) => !task.scheduled_date), [tasksToPlan]);
 
   async function addTask() {
     const title = newTaskTitle.trim();
@@ -771,6 +777,7 @@ export default function HomeScreen() {
       priority: newTaskPriority,
       scheduled_date: newTaskDate,
       scheduled_date_kind: scheduledTime ? 'exact' : newTaskDateKind,
+      exclude_from_plan: newTaskExcluded,
       scheduled_time: scheduledTime,
       scheduled_window_start: scheduledWindowStart,
       scheduled_window_end: scheduledWindowEnd,
@@ -782,7 +789,7 @@ export default function HomeScreen() {
       is_unscheduled: false,
       planning_note: null,
     };
-    const selectedFields = 'id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes';
+    const selectedFields = 'id, title, category, duration_minutes, priority, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, exclude_from_plan, is_splittable, reminder_enabled, reminder_minutes, recurrence_rule, recurrence_end_date, task_type, notes';
     const recurringTaskValues = !editingTask && newTaskRecurrence !== 'none' && newTaskDate
       ? recurrenceDates(newTaskDate, newTaskRecurrence, newTaskRecurrenceEndDate).map((scheduledDate) => ({ user_id: session.user.id, ...taskValues, scheduled_date: scheduledDate }))
       : null;
@@ -815,7 +822,14 @@ export default function HomeScreen() {
     if (checklistError) {
       Alert.alert('Checklist non salvata', 'Il task è stato creato, ma non riesco a salvare i punti della checklist. Riprova a modificarlo.');
     }
-    if (editingTask) await supabase.from('task_blocks').delete().eq('task_id', editingTask.id);
+    if (editingTask) {
+      const { error: blockDeleteError } = await supabase.from('task_blocks').delete().eq('task_id', editingTask.id).eq('user_id', session.user.id);
+      if (blockDeleteError) {
+        Alert.alert('Agenda non aggiornata', 'Il task è stato salvato, ma non riesco a rimuovere i suoi vecchi blocchi. Riprova dopo aver controllato Supabase.');
+        await loadTasks();
+        return;
+      }
+    }
     await loadTasks();
     closeComposer();
   }
@@ -841,6 +855,7 @@ export default function HomeScreen() {
     setCustomMinutes('0');
     setNewTaskDate(toDateKey(new Date()));
     setNewTaskDateKind('deadline');
+    setNewTaskExcluded(false);
     setNewTaskTime('');
     setNewTaskWindowStart('');
     setNewTaskWindowEnd('');
@@ -866,6 +881,7 @@ export default function HomeScreen() {
     setNewTaskPriority(task.priority);
     setNewTaskDate(task.scheduled_date);
     setNewTaskDateKind(task.scheduled_date_kind);
+    setNewTaskExcluded(task.exclude_from_plan);
     setNewTaskTime(task.scheduled_time?.slice(0, 5) ?? '');
     setNewTaskWindowStart(task.scheduled_window_start?.slice(0, 5) ?? '');
     setNewTaskWindowEnd(task.scheduled_window_end?.slice(0, 5) ?? '');
@@ -914,7 +930,7 @@ export default function HomeScreen() {
   function chooseDate(date: Date) {
     const selectedDate = toDateKey(date);
     if (calendarTarget === 'recurrenceEnd') setNewTaskRecurrenceEndDate(selectedDate);
-    else setNewTaskDate(selectedDate);
+    else { setNewTaskDate(selectedDate); if (newTaskExcluded) setNewTaskReminderEnabled(defaultReminderEnabled); setNewTaskExcluded(false); }
     setIsCalendarOpen(false);
   }
 
@@ -1033,7 +1049,7 @@ export default function HomeScreen() {
                   <Text style={styles.focusDescription}>{unplannedMinutes} minuti ancora da pianificare.</Text>
                 </View>
                 <View style={styles.focusCircle}>
-                  <Text style={styles.focusCircleNumber}>{unplannedTasks.filter((task) => !task.is_complete).length}</Text>
+                  <Text style={styles.focusCircleNumber}>{tasksToPlan.filter((task) => !task.is_complete).length}</Text>
                   <Text style={styles.focusCircleLabel}>da fare</Text>
                 </View>
               </View>
@@ -1053,6 +1069,11 @@ export default function HomeScreen() {
             <Text style={styles.backlogDescription}>Cose da fare che devono ancora trovare posto nello spartito.</Text>
             {undatedUnplannedTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => confirmDeleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
             {!undatedUnplannedTasks.length && <Text style={styles.emptyText}>Nessun task senza data.</Text>}
+            {excludedTasks.length > 0 && <View style={styles.backlogSection}>
+              <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Fuori Agenda</Text><Text style={styles.sectionCount}>{excludedTasks.length} task</Text></View>
+              <Text style={styles.backlogDescription}>Li tieni qui senza inserirli nel piano automatico.</Text>
+              {excludedTasks.map((task) => <SwipeableTask key={task.id} task={task} onToggle={() => void toggleTask(task)} onEdit={() => openEditTask(task)} onDelete={() => confirmDeleteTask(task)} onToggleChecklistItem={(item) => void toggleChecklistItem(task, item)} />)}
+            </View>}
           </View>}
         />
 
@@ -1137,7 +1158,7 @@ export default function HomeScreen() {
               <Text style={styles.dateHint}>Scegli il giorno preciso oppure una scadenza entro cui completarlo.</Text>
               <View style={styles.optionRow}>
                 {quickDateOptions.map((option) => (
-                  <Pressable key={option.label} onPress={() => { interruptVoiceGuide(); setNewTaskDate(option.value); if (!option.value) setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDate === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDate === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
+                  <Pressable key={option.label} onPress={() => { interruptVoiceGuide(); setNewTaskDate(option.value); if (option.value) { if (newTaskExcluded) setNewTaskReminderEnabled(defaultReminderEnabled); setNewTaskExcluded(false); } else setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDate === option.value && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDate === option.value && styles.choiceTextSelected]}>{option.label}</Text></Pressable>
                 ))}
               </View>
               <Pressable onPress={() => { interruptVoiceGuide(); openCalendar(); }} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Calendario</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskDate) ?? 'Scegli un giorno'}</Text></Pressable>
@@ -1145,11 +1166,17 @@ export default function HomeScreen() {
                 <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskDateKind('exact'); }} style={[styles.choiceButton, newTaskDateKind === 'exact' && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDateKind === 'exact' && styles.choiceTextSelected]}>Proprio quel giorno</Text></Pressable>
                 <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskDateKind('deadline'); setNewTaskTime(''); }} style={[styles.choiceButton, newTaskDateKind === 'deadline' && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskDateKind === 'deadline' && styles.choiceTextSelected]}>Entro quel giorno</Text></Pressable>
               </View>}
+              {!newTaskDate && <><Text style={styles.fieldLabel}>INSERIMENTO NELL’AGENDA</Text>
+              <Text style={styles.dateHint}>Se lo tieni fuori, il task resta in Pianifica e non occupa nessuna fascia quando ricalcoli il piano.</Text>
+              <View style={styles.optionRow}>
+                <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskExcluded(false); setNewTaskReminderEnabled(defaultReminderEnabled); }} style={[styles.choiceButton, !newTaskExcluded && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !newTaskExcluded && styles.choiceTextSelected]}>Pianifica automaticamente</Text></Pressable>
+                <Pressable onPress={() => { interruptVoiceGuide(); setNewTaskExcluded(true); setNewTaskTime(''); setNewTaskWindowStart(''); setNewTaskWindowEnd(''); setNewTaskReminderEnabled(false); }} style={[styles.choiceButton, newTaskExcluded && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskExcluded && styles.choiceTextSelected]}>Tieni fuori dall’Agenda</Text></Pressable>
+              </View></>}
             </View>
-            <View onLayout={(event) => rememberVoiceStepPosition('time', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'time' && styles.voiceStepSectionActive]}>
+            {!newTaskExcluded && <View onLayout={(event) => rememberVoiceStepPosition('time', event.nativeEvent.layout.y)} style={[styles.voiceStepSection, voiceStep === 'time' && styles.voiceStepSectionActive]}>
               <Text style={styles.fieldLabel}>ORARIO <Text style={styles.optionalLabel}>FACOLTATIVO</Text></Text>
               <TextInput keyboardType="number-pad" maxLength={5} placeholder="HH:MM  ·  es. 09:30" placeholderTextColor="#938F8B" value={newTaskTime} onFocus={interruptVoiceGuide} onChangeText={(value) => { setNewTaskTime(formatTimeInput(value)); if (value) setNewTaskDateKind('exact'); }} style={styles.input} />
-            </View>
+            </View>}
             <View onTouchStart={interruptVoiceGuide}>
               <Text style={styles.fieldLabel}>RIPETIZIONE</Text>
               <Text style={styles.dateHint}>{newTaskRecurrence === 'none' ? 'Puoi rendere il task ricorrente.' : 'Scegli fino a quando ripeterlo, altrimenti Cadenza crea al massimo 90 giorni di occorrenze.'}</Text>
@@ -1161,7 +1188,7 @@ export default function HomeScreen() {
               {newTaskRecurrence !== 'none' && <><Text style={styles.fieldLabel}>FINE RIPETIZIONE <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text><Pressable onPress={() => openCalendar('recurrenceEnd')} style={styles.calendarButton}><Text style={styles.calendarButtonLabel}>Termina il</Text><Text style={styles.calendarButtonValue}>{formatScheduledDate(newTaskRecurrenceEndDate) ?? 'Nessuna data'}</Text></Pressable>{newTaskRecurrenceEndDate && <Pressable onPress={() => setNewTaskRecurrenceEndDate(null)} style={styles.clearRecurrenceEndButton}><Text style={styles.clearRecurrenceEndText}>Rimuovi data di fine</Text></Pressable>}</>}
               {editingTask?.recurrence_rule !== 'none' && <Text style={styles.dateHint}>La modifica vale solo per questa occorrenza.</Text>}
             </View>
-            <Text style={styles.fieldLabel}>FASCIA ORARIA FORZATA <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text>
+            {!newTaskExcluded && <><Text style={styles.fieldLabel}>FASCIA ORARIA FORZATA <Text style={styles.optionalLabel}>FACOLTATIVA</Text></Text>
             <Text style={styles.dateHint}>Cadenza pianificherà il task soltanto fra questi due orari.</Text>
             <View style={styles.taskTimeRangeRow}>
               <TextInput keyboardType="number-pad" maxLength={5} placeholder="Dalle HH:MM" placeholderTextColor="#938F8B" value={newTaskWindowStart} onFocus={interruptVoiceGuide} onChangeText={(value) => setNewTaskWindowStart(formatTimeInput(value))} style={[styles.input, styles.taskTimeRangeInput]} />
@@ -1174,7 +1201,7 @@ export default function HomeScreen() {
                 <Pressable onPress={() => setNewTaskReminderEnabled(false)} style={[styles.choiceButton, !newTaskReminderEnabled && styles.choiceButtonSelected]}><Text style={[styles.choiceText, !newTaskReminderEnabled && styles.choiceTextSelected]}>No</Text></Pressable>
               </View>
               {newTaskReminderEnabled && <><Text style={styles.fieldLabel}>QUANTI MINUTI PRIMA?</Text><View style={styles.optionRow}>{[0, 5, 10, 15, 30, 60].map((minutes) => <Pressable key={minutes} onPress={() => setNewTaskReminderMinutes(minutes)} style={[styles.choiceButton, newTaskReminderMinutes === minutes && styles.choiceButtonSelected]}><Text style={[styles.choiceText, newTaskReminderMinutes === minutes && styles.choiceTextSelected]}>{minutes ? `${minutes} min` : 'All’orario'}</Text></Pressable>)}</View></>}
-            </View>
+            </View></>}
             <View onLayout={(event) => rememberVoiceStepPosition('save', event.nativeEvent.layout.y)}>
               {voiceStep === 'save' && <View style={styles.voiceSavePrompt}><Text style={styles.voiceSavePromptText}>Pronuncia “salva” per salvare il task</Text></View>}
               <Pressable accessibilityRole="button" disabled={!newTaskTitle.trim() || isSaving} onPress={() => { interruptVoiceGuide(); void addTask(); }} style={({ pressed }) => [styles.saveButton, voiceStep === 'save' && styles.saveButtonWithVoicePrompt, (!newTaskTitle.trim() || isSaving) && styles.saveButtonDisabled, pressed && styles.saveButtonPressed]}>
@@ -1224,11 +1251,16 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  webTaskActions: { flexDirection: 'row', gap: 16, justifyContent: 'flex-end', marginTop: 8, paddingHorizontal: 10 },
-  webEditAction: { padding: 7 },
-  webEditActionText: { color: '#305D4A', fontSize: 12, fontWeight: '800' },
-  webDeleteAction: { padding: 7 },
-  webDeleteActionText: { color: '#B33932', fontSize: 12, fontWeight: '800' },
+  outOfPlanMeta: { color: '#765D00', fontSize: 12, fontWeight: '800' },
+  webTaskWrapper: { backgroundColor: '#FFFFFF', borderColor: '#E2E4E0', borderWidth: 1, borderRadius: 16 },
+  webTaskCard: { backgroundColor: '#FFFFFF', borderWidth: 0, borderRadius: 0, minHeight: 74, paddingHorizontal: 18 },
+  webTaskActions: { alignItems: 'center', borderTopColor: '#EEF0EC', borderTopWidth: 1, flexDirection: 'row', gap: 8, justifyContent: 'flex-end', paddingHorizontal: 10, paddingVertical: 7 },
+  webActionButton: { alignItems: 'center', borderRadius: 8, justifyContent: 'center', minHeight: 34, minWidth: 82, paddingHorizontal: 12 },
+  webActionPressed: { opacity: 0.7 },
+  webEditAction: { backgroundColor: '#EAF1EB' },
+  webEditActionText: { color: '#305D4A', fontSize: 12, fontWeight: '700' },
+  webDeleteAction: { backgroundColor: '#F7F7F5' },
+  webDeleteActionText: { color: '#9C4B48', fontSize: 12, fontWeight: '700' },
   webContent: { alignSelf: 'center', maxWidth: 920, paddingHorizontal: 0, width: '90%' },
   webModalBackdrop: { justifyContent: 'center', padding: 20 },
   webModalCard: { alignSelf: 'center', borderBottomLeftRadius: 28, borderBottomRightRadius: 28, maxWidth: 700, width: '90%' },

@@ -15,6 +15,7 @@ Per provare il pacchetto destinato alla pubblicazione, esegui `npx expo export -
 
 - In **Authentication → URL Configuration**, aggiungi l'indirizzo locale mostrato da Expo (per esempio `http://localhost:8081`) agli URL di reindirizzamento. Quando pubblichi la webapp, aggiungi anche il suo indirizzo HTTPS. Serve per le email di conferma dei nuovi account.
 - Per collegare Google Calendar direttamente dal browser, applica la migrazione `supabase/migrations/017_google_oauth_web_redirect.sql` e distribuisci di nuovo le Edge Functions `google-calendar-connect` e `google-calendar-oauth-callback`. I segreti Google già configurati restano gli stessi.
+- Per usare l'opzione **Tieni fuori dall'Agenda**, applica anche `supabase/migrations/018_exclude_tasks_from_plan.sql`.
 - Il riconoscimento vocale sul web dipende dal browser e dal permesso per il microfono. In produzione usa HTTPS.
 
 I promemoria locali sono disponibili nell'app Android; la webapp mostra task e Agenda senza promettere notifiche del browser.

@@ -12,6 +12,7 @@ export type PlannerTask = {
   scheduled_window_start: string | null;
   scheduled_window_end: string | null;
   is_complete: boolean;
+  exclude_from_plan: boolean;
   is_splittable: boolean;
 };
 
@@ -90,8 +91,9 @@ export function buildAutomaticPlan(
   manualBlocks: PlannedBlock[] = [],
   busyIntervals: PlannerBusyInterval[] = [],
 ): PlanResult {
-  const activeTasks = tasks.filter((task) => !task.is_complete);
-  const currentManualBlocks = manualBlocks.filter((block) => !isBlockExpired(block, startDate));
+  const activeTasks = tasks.filter((task) => !task.is_complete && !task.exclude_from_plan);
+  const activeTaskIds = new Set(activeTasks.map((task) => task.id));
+  const currentManualBlocks = manualBlocks.filter((block) => activeTaskIds.has(block.task_id) && !isBlockExpired(block, startDate));
   const blocks: PlannedBlock[] = currentManualBlocks.map((block) => ({ ...block, is_manual: true }));
   const fixedRemainders = new Map<string, number>();
   const manuallyAllocatedMinutes = new Map<string, number>();

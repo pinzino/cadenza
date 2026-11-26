@@ -191,7 +191,7 @@ export default function PlanScreen() {
     setIsLoading(true);
     setErrorMessage(null);
     const [tasksResult, settingsResult, blocksResult] = await Promise.all([
-      supabase.from('tasks').select('id, title, category, priority, duration_minutes, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, is_unscheduled, planning_note, reminder_enabled, reminder_minutes'),
+      supabase.from('tasks').select('id, title, category, priority, duration_minutes, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, exclude_from_plan, is_splittable, is_unscheduled, planning_note, reminder_enabled, reminder_minutes'),
       supabase.from('planner_settings').select('work_windows, personal_windows, max_block_minutes, break_minutes').eq('user_id', currentUserId).maybeSingle(),
       supabase.from('task_blocks').select('id, task_id, block_date, start_time, end_time, duration_minutes, block_index, total_blocks, is_fixed, is_manual').order('block_date').order('start_time'),
     ]);
@@ -233,12 +233,12 @@ export default function PlanScreen() {
   const showingToday = selectedDate === currentDate;
   const activeEntryIndex = showingToday ? timedAgenda.findIndex((entry) => entry.start <= currentMinutes && currentMinutes < entry.end) : -1;
   const nowLineIndex = !showingToday ? -1 : activeEntryIndex >= 0 ? activeEntryIndex : timedAgenda.findIndex((entry) => entry.start > currentMinutes);
-  const unscheduledTasks = useMemo(() => tasks.filter((task) => !task.is_complete && task.is_unscheduled), [tasks]);
-  const tasksNeedingPlacement = useMemo(() => tasks.filter((task) => !task.is_complete && (task.is_unscheduled || !blocks.some((block) => block.task_id === task.id))), [blocks, tasks]);
+  const unscheduledTasks = useMemo(() => tasks.filter((task) => !task.is_complete && !task.exclude_from_plan && task.is_unscheduled), [tasks]);
+  const tasksNeedingPlacement = useMemo(() => tasks.filter((task) => !task.is_complete && !task.exclude_from_plan && (task.is_unscheduled || !blocks.some((block) => block.task_id === task.id))), [blocks, tasks]);
   const completedTaskIds = useMemo(() => new Set(tasks.filter((task) => task.is_complete).map((task) => task.id)), [tasks]);
   const activeBlocks = useMemo(() => blocks.filter((block) => !completedTaskIds.has(block.task_id)), [blocks, completedTaskIds]);
   const overdueTaskIds = useMemo(() => {
-    const activeIds = new Set(tasks.filter((task) => !task.is_complete).map((task) => task.id));
+    const activeIds = new Set(tasks.filter((task) => !task.is_complete && !task.exclude_from_plan).map((task) => task.id));
     return new Set(blocks.filter((block) => activeIds.has(block.task_id) && isBlockExpired(block, now)).map((block) => block.task_id));
   }, [blocks, now, tasks]);
   const weekDates = useMemo(() => {
@@ -296,7 +296,7 @@ export default function PlanScreen() {
     if (!userId) return;
     setIsPlanning(true);
     const [tasksResult, settingsResult, blocksResult] = await Promise.all([
-      supabase.from('tasks').select('id, title, category, priority, duration_minutes, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, is_splittable, is_unscheduled, planning_note, reminder_enabled, reminder_minutes'),
+      supabase.from('tasks').select('id, title, category, priority, duration_minutes, scheduled_date, scheduled_date_kind, scheduled_time, scheduled_window_start, scheduled_window_end, is_complete, exclude_from_plan, is_splittable, is_unscheduled, planning_note, reminder_enabled, reminder_minutes'),
       supabase.from('planner_settings').select('work_windows, personal_windows, max_block_minutes, break_minutes').eq('user_id', userId).maybeSingle(),
       supabase.from('task_blocks').select('id, task_id, block_date, start_time, end_time, duration_minutes, block_index, total_blocks, is_fixed, is_manual').eq('user_id', userId),
     ]);
@@ -311,20 +311,23 @@ export default function PlanScreen() {
     }
     const planningTime = new Date();
     const existingBlocks = (blocksResult.data ?? []) as (PlannedBlock & { id: string })[];
-    const activeTaskIds = new Set(latestTasks.filter((task) => !task.is_complete).map((task) => task.id));
+    const activeTaskIds = new Set(latestTasks.filter((task) => !task.is_complete && !task.exclude_from_plan).map((task) => task.id));
+    const excludedTaskIds = new Set(latestTasks.filter((task) => task.exclude_from_plan).map((task) => task.id));
     const completedTaskIds = new Set(latestTasks.filter((task) => task.is_complete).map((task) => task.id));
     const expiredTaskIds = new Set(existingBlocks.filter((block) => activeTaskIds.has(block.task_id) && isBlockExpired(block, planningTime)).map((block) => block.task_id));
     const expiredManualIds = existingBlocks.filter((block) => activeTaskIds.has(block.task_id) && block.is_manual && isBlockExpired(block, planningTime)).map((block) => block.id);
+    const excludedBlockIds = existingBlocks.filter((block) => excludedTaskIds.has(block.task_id)).map((block) => block.id);
     const currentManualBlocks = existingBlocks.filter((block) => activeTaskIds.has(block.task_id) && block.is_manual && !isBlockExpired(block, planningTime));
     const completedBusyIntervals = existingBlocks.filter((block) => completedTaskIds.has(block.task_id)).map((block) => ({ block_date: block.block_date, start_time: block.start_time, end_time: block.end_time }));
     const activeAutomaticIds = existingBlocks.filter((block) => activeTaskIds.has(block.task_id) && !block.is_manual).map((block) => block.id);
     const planningTasks = latestTasks.map((task) => expiredTaskIds.has(task.id) ? { ...task, scheduled_date: null, scheduled_time: null } : task);
     const result = buildAutomaticPlan(planningTasks, latestSettings, planningTime, currentManualBlocks, [...googleBusyResult.intervals, ...completedBusyIntervals]);
+    const unscheduledTaskIds = result.unscheduledTaskIds.filter((id) => activeTaskIds.has(id));
     const automaticBlocks = result.blocks.filter((block) => !block.is_manual);
-    if (expiredManualIds.length) {
-      const expiredManualDelete = await supabase.from('task_blocks').delete().eq('user_id', userId).in('id', expiredManualIds);
-      if (expiredManualDelete.error) {
-        setIsPlanning(false); Alert.alert('Piano non salvato', 'Non riesco a liberare i blocchi scaduti. Riprova tra poco.'); return;
+    if (expiredManualIds.length || excludedBlockIds.length) {
+      const staleBlockDelete = await supabase.from('task_blocks').delete().eq('user_id', userId).in('id', [...expiredManualIds, ...excludedBlockIds]);
+      if (staleBlockDelete.error) {
+        setIsPlanning(false); Alert.alert('Piano non salvato', 'Non riesco a rimuovere i blocchi non più pianificati. Riprova tra poco.'); return;
       }
     }
     const deleteResult = activeAutomaticIds.length
@@ -335,8 +338,8 @@ export default function PlanScreen() {
       setIsPlanning(false); Alert.alert('Piano non salvato', 'Controlla gli aggiornamenti Supabase e riprova.'); return;
     }
     const clearStatusResult = await supabase.from('tasks').update({ is_unscheduled: false, planning_note: null }).eq('user_id', userId);
-    const setUnscheduledResult = result.unscheduledTaskIds.length
-      ? await supabase.from('tasks').update({ is_unscheduled: true, planning_note: 'Disponibilità insufficiente nei prossimi 90 giorni.' }).in('id', result.unscheduledTaskIds)
+    const setUnscheduledResult = unscheduledTaskIds.length
+      ? await supabase.from('tasks').update({ is_unscheduled: true, planning_note: 'Disponibilità insufficiente nei prossimi 90 giorni.' }).in('id', unscheduledTaskIds)
       : { error: null };
     if (clearStatusResult.error || setUnscheduledResult.error) {
       setIsPlanning(false); Alert.alert('Piano salvato', 'Il piano è stato creato, ma non riesco ad aggiornare la sezione Da sistemare. Esegui l’aggiornamento 006 in Supabase.'); return;
@@ -347,11 +350,12 @@ export default function PlanScreen() {
     setSettings(latestSettings);
     await loadPlanner(userId);
     setIsPlanning(false);
-    const overdueNotRescheduled = result.unscheduledTaskIds.filter((id) => expiredTaskIds.has(id));
+    const missingTaskNames = unscheduledTaskIds.map((id) => titleByTask.get(id) ?? 'Task');
+    const overdueNotRescheduled = unscheduledTaskIds.filter((id) => expiredTaskIds.has(id));
     if (overdueNotRescheduled.length) {
-      Alert.alert('Task scaduti da sistemare', `${overdueNotRescheduled.length} ${overdueNotRescheduled.length === 1 ? 'task scaduto non è stato ripianificato' : 'task scaduti non sono stati ripianificati'} completamente: manca spazio disponibile nei prossimi 90 giorni.`);
-    } else if (result.unscheduledTaskIds.length) {
-      Alert.alert('Piano parziale', `${result.unscheduledTaskIds.length} task non entrano nei prossimi 90 giorni.`);
+      Alert.alert('Task scaduti da sistemare', `${overdueNotRescheduled.length} ${overdueNotRescheduled.length === 1 ? 'task scaduto non è stato ripianificato' : 'task scaduti non sono stati ripianificati'} completamente: manca spazio disponibile nei prossimi 90 giorni.\nDa sistemare: ${missingTaskNames.join(', ')}.`);
+    } else if (unscheduledTaskIds.length) {
+      Alert.alert('Piano parziale', `${unscheduledTaskIds.length} ${unscheduledTaskIds.length === 1 ? 'task non entra' : 'task non entrano'} nei prossimi 90 giorni.\nDa sistemare: ${missingTaskNames.join(', ')}.`);
     }
   }
 
